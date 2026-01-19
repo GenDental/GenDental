@@ -1,0 +1,54 @@
+model:
+  module: models.global_encoder.gpt.ToothGPT
+  params:
+    transformer_config:
+      module: models.global_encoder.gpt_blocks.ToothTransformer
+      params:
+        trans_dim: 1024
+        depth: 24
+        drop_path_rate: 0.1
+        num_heads: 16
+        group_size: 512
+        encoder_dims: 1024
+        style_dims: 2048
+        decoder_depth: 4
+        num_groups: 33
+        codebook_dim: 1024
+        codebook_size: 2048
+        num_quantizers: 2
+        encoder_config:
+          module: models.single_encoder.pointnet_plus_encoder.PointNetEncoder
+          params:
+            sa_blocks: [
+              [[32, 2, 32], [1024, 0.1, 32, [32, 32]]],
+              [[32, 1, 16], [256, 0.2, 32, [32, 128]]]
+            ]
+        
+
+    
+    optimizer_config:
+      module: torch.optim.AdamW
+      weight_decay: 0.05
+      betas: (0.9, 0.95)
+      eps: 1e-8
+      grad_clip: 1.0
+
+    scheduler_config:
+      module: pl_bolts.optimizers.lr_scheduler.LinearWarmupCosineAnnealingLR
+      params:
+        warmup_epochs: 5
+        warmup_start_lr: 0.0
+        eta_min: 1e-7
+    
+    
+  
+dataset:
+  module: dataset.teeth_dataset.TeethDataManager
+  params:
+    data_path: /data3/leics/dataset/teeth/sample512_merged
+    index_path: "files/ours_alignment"
+    batch_size: 128
+
+
+
+
