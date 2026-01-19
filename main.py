@@ -10,7 +10,7 @@
 # their software and algorithms, including trained model weights, parameters (including
 # optimizer states), machine-learning model code, inference-enabling code, training-enabling code,
 # fine-tuning enabling code and other elements of the foregoing made publicly available
-# by Tencent in accordance with TENCENT HUNYUAN COMMUNITY LICENSE AGREEMENT.
+# by Tencent in accordance with TENCENT HUNYUAN COMMUNITY LICENSE AGREEMENT
 
 from typing import Tuple, List
 import warnings
