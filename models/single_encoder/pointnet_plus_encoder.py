@@ -54,8 +54,11 @@ class PointNetPlusEncoder(nn.Module):
         [[32, 2, 32], [1024, 0.1, 32, [32, 32]]],
         [[32, 1, 16], [256, 0.2, 32, [32, 128]]]
         ]
-    def __init__(self, encoder_dims):
+    def __init__(self, encoder_dims, sa_blocks=None):
         super().__init__()
+        # Keep the historical architecture as the default while allowing
+        # newer models to provide a lighter PointNet++ hierarchy in YAML.
+        self.sa_blocks = sa_blocks if sa_blocks is not None else self.sa_blocks
         layers, sa_in_channels, channels_sa_features, _  = \
             create_pointnet2_sa_components(self.sa_blocks, 
             extra_feature_channels=0, input_dim=3, 
@@ -125,6 +128,5 @@ class StyleEncoder(nn.Module):
         features = self.mlp(features)
         # features: B,D,N; xyz: B,3,N
         return features
-
 
 

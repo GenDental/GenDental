@@ -1,10 +1,18 @@
-export CUDA_VISIBLE_DEVICES=1
-num_gpus=$(echo $CUDA_VISIBLE_DEVICES | tr ',' '\n' | wc -l)
-python main.py --config configs/stage_one.yaml \
- --output_dir /data3/leics/dataset/checkpoints/ToothWise/old_gpt \
- --ckpt_path /data3/leics/dataset/checkpoints/ToothWise/old_gpt_segment/ckpt/last.ckpt \
- --epochs 1000 \
- --num_gpus $num_gpus \
- --base_lr 1e-5\
- --test \
- --fast \
+#!/usr/bin/env bash
+set -euo pipefail
+source "$(dirname -- "${BASH_SOURCE[0]}")/_common.sh"
+
+# Frequently changed generation settings live here, not in the YAML file.
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+CKPT_PATH="${CKPT_PATH:-/data3/leics/dataset/checkpoints/ToothWise/latent_gpt_v2/ckpt}"
+OUTPUT_DIR="${OUTPUT_DIR:-./gpt_samples}"
+NUM_SAMPLES="${NUM_SAMPLES:-10}"
+BATCH_SIZE="${BATCH_SIZE:-10}"
+SAVE_MERGED="${SAVE_MERGED:-true}"
+
+run_gendental generate configs/stage_one.yaml \
+  --ckpt_path "$CKPT_PATH" --fast \
+  --set "generation.output_dir=$OUTPUT_DIR" \
+  --set "generation.num_samples=$NUM_SAMPLES" \
+  --set "generation.batch_size=$BATCH_SIZE" \
+  --set "generation.save_merged=$SAVE_MERGED"

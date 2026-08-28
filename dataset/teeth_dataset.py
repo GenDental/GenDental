@@ -27,24 +27,47 @@ class TeethDataset(data.Dataset):
     def __getitem__(self, idx):
         index = self.indexes[idx]
         try:
-            data = np.load(os.path.join(self.data_path, f'{index}.npz'))
-        except:
-            print(f'Error loading {index}.npz')
+            sample = np.load(os.path.join(self.data_path, f'{index}.npz'))
+        except Exception as error:
+            raise RuntimeError(f'Error loading {index}.npz') from error
             
-        before_pts = data['before_pts'] 
-        after_pts = data['after_pts']
-        mask = data['mask']
+        before_pts = sample['before_pts'].copy()
+        after_pts = sample['after_pts'].copy()
+        mask = sample['mask']
         eps = 1e-6
         for i in range(32):
             if not mask[i]:
                 before_pts[i] = after_pts[i] = np.random.random(after_pts[i].shape) * eps
         before_pts = torch.tensor(before_pts,dtype=torch.float32)
         after_pts = torch.tensor(after_pts,dtype=torch.float32)
-        before_normals = torch.tensor(before_normals,dtype=torch.float32)
-        after_normals = torch.tensor(after_normals,dtype=torch.float32)
         mask = torch.tensor(mask,dtype=torch.float32)
-        # 
-        return index,before_pts,after_pts,mask
+        if not self.with_normals:
+            return index, before_pts, after_pts, mask
+
+        missing_keys = {
+            key for key in ('before_normals', 'after_normals')
+            if key not in sample
+        }
+        if missing_keys:
+            raise KeyError(
+                f'{index}.npz is missing normal arrays: '
+                f'{sorted(missing_keys)}. Set with_normals=false when the '
+                'model does not use normals.'
+            )
+        before_normals = torch.tensor(
+            sample['before_normals'], dtype=torch.float32
+        )
+        after_normals = torch.tensor(
+            sample['after_normals'], dtype=torch.float32
+        )
+        return (
+            index,
+            before_pts,
+            after_pts,
+            before_normals,
+            after_normals,
+            mask,
+        )
     
     def __len__(self):
         return len(self.indexes) 

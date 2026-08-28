@@ -24,17 +24,3 @@ model:
         warmup_epochs: 5
         warmup_start_lr: 0.0
         eta_min: 1e-7
-    
-    
-  
-dataset:
-  module: dataset.synthetic_dataset.SyntheticDataManager
-  params:
-    style_path: /data3/leics/dataset/teeth/sample512_merged
-    data_path: /data3/leics/dataset/teeth/sample512_merged
-    index_path: "files/synthetic"
-    batch_size: 16
-
-
-
-

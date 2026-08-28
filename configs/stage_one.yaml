@@ -1,54 +1,96 @@
 model:
-  module: models.global_encoder.gpt.ToothGPT
+  module: models.global_encoder.gpt.LatentGPT
   params:
     transformer_config:
-      module: models.global_encoder.gpt_blocks.ToothTransformer
+      module: models.global_encoder.gpt_blocks.LatentGPTTransformer
       params:
-        trans_dim: 1024
-        depth: 24
+        trans_dim: 768
+        depth: 18
         drop_path_rate: 0.1
-        num_heads: 16
+        num_heads: 8
+
         group_size: 512
-        encoder_dims: 1024
-        style_dims: 2048
-        decoder_depth: 4
+        encoder_dims: 512
+        decoder_depth: 3
         num_groups: 33
-        codebook_dim: 1024
+        latent_dim: 256
+        share_encoder: true
+        encoder_tooth_chunk_size: 4
+        encoder_sa_blocks: [
+          [[32, 2, 32], [256, 0.1, 32, [32, 64]]],
+          [[64, 1, 16], [64, 0.2, 32, [64, 128]]]
+        ]
+
+        dropout: 0.1
+        attn_dropout: 0.05
+        mlp_ratio: 2.6666667
+
+        # Set according to the actual coordinate scale.
+        # Use 1.0 only when tooth centers are already around [-1, 1].
+        center_scale: 1.0
+
+        posterior_logvar_min: -8.0
+        posterior_logvar_max: 4.0
+        prior_logvar_min: -6.0
+        prior_logvar_max: 2.0
+        decoder_hidden_dim: 1024
+
+        # Legacy compatibility arguments; ignored by the new model.
+        encoder_config: null
+        style_dims: 2048
         codebook_size: 2048
         num_quantizers: 2
-        encoder_config:
-          module: models.single_encoder.pointnet_plus_encoder.PointNetEncoder
-          params:
-            sa_blocks: [
-              [[32, 2, 32], [1024, 0.1, 32, [32, 32]]],
-              [[32, 1, 16], [256, 0.2, 32, [32, 128]]]
-            ]
-        
+        codebook_dim: 1024
 
-    
     optimizer_config:
       module: torch.optim.AdamW
-      weight_decay: 0.05
-      betas: (0.9, 0.95)
-      eps: 1e-8
-      grad_clip: 1.0
+      params:
+        weight_decay: 0.05
+        betas: [0.9, 0.95]
+        eps: 1.0e-8
 
     scheduler_config:
       module: pl_bolts.optimizers.lr_scheduler.LinearWarmupCosineAnnealingLR
       params:
-        warmup_epochs: 5
+        warmup_epochs: 10
         warmup_start_lr: 0.0
-        eta_min: 1e-7
-    
-    
-  
+        eta_min: 1.0e-7
+
+    use_ema: false
+
+    posterior_reconstruction_weight: 1.0
+    # The prior is primarily matched to the posterior through KL. A weaker
+    # mean-reconstruction term avoids forcing a multimodal prior to regress an
+    # over-smoothed average tooth.
+    prior_reconstruction_weight: 0.25
+    latent_prior_kl_weight: 0.1
+    posterior_standard_kl_weight: 0.0001
+    kl_warmup_epochs: 50
+    latent_prior_free_bits: 0.02
+    posterior_standard_free_bits: 0.0
+    center_loss_weight: 1.0
+    mask_weight: 1.0
+    # Class order is [missing, present]. Re-estimate this from the actual
+    # training split if its missing/present ratio changes.
+    mask_class_weights: [2.0, 1.0]
+    chamfer_l2_weight: 1.0
+    chamfer_l1_weight: 0.0
+
+    test_output_dir: ./gpt_samples
+    num_test_generations: 83
+    max_test_samples: 830
+    save_merged: True
+
+    # Sampling strengths at test time.
+    latent_temperature: 1.0
+    # Kept only for backward compatibility; centers are deterministic now.
+    center_temperature: 0.0
+    mask_temperature: 0.8
+
 dataset:
   module: dataset.teeth_dataset.TeethDataManager
   params:
-    data_path: /data3/leics/dataset/teeth/sample512_merged
-    index_path: "files/ours_alignment"
-    batch_size: 128
-
-
-
-
+    data_path: /data3/leics/dataset/teeth/guangdong_all2
+    index_path: "files/guangdong"
+    batch_size: 16
+    with_normals: false

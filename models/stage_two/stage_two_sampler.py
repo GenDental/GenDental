@@ -17,6 +17,9 @@ from utils import instantiate_from_config, instantiate_non_trainable_model
 from utils import write_pointcloud
 import torch.nn.init as init
 from models.stage_two.smooth import postprocess_smooth_se3
+from pathlib import Path
+from typing import List, Tuple
+from utils import read_pointcloud
 
 def remove_prefix_from_state_dict(state_dict, prefix="GPT_Transformer."):
     new_state_dict = {}
@@ -101,24 +104,25 @@ class MotionTransferSampler(pl.LightningModule):
         return loss
     
     def on_save_checkpoint(self, checkpoint):
-        checkpoint['ema_state'] = self.ema_model.state_dict()
+        if self.use_ema:
+            checkpoint['ema_state'] = self.ema_model.state_dict()
 
     def on_load_checkpoint(self, checkpoint):
-        if 'ema_state' in checkpoint:
+        if self.use_ema and 'ema_state' in checkpoint:
             self.ema_model.load_state_dict(checkpoint['ema_state'])
     
     @contextmanager
     def ema_scope(self, context=None):
         if self.use_ema:
-            self.ema_model.store(self.gpt_transformer.parameters())
-            self.ema_model.copy_to(self.gpt_transformer.parameters())
+            self.ema_model.store(self.transformer.parameters())
+            self.ema_model.copy_to(self.transformer.parameters())
             if context is not None:
                 print(f"{context}: Switched to EMA weights")
         try:
             yield None
         finally:
             if self.use_ema:
-                self.ema_model.restore(self.gpt_transformer.parameters())
+                self.ema_model.restore(self.transformer.parameters())
                 if context is not None:
                     print(f"{context}: Restored training weights")
     
@@ -144,6 +148,286 @@ class MotionTransferSampler(pl.LightningModule):
         self.log_dict(loss_dict, prog_bar=True, logger=True, sync_dist=False, rank_zero_only=True)
 
         return loss
+
+    @staticmethod
+    def _sort_key(path: Path):
+        return (0, int(path.stem)) if path.stem.isdigit() else (1, path.stem)
+
+    @staticmethod
+    def _load_style(
+        path: Path,
+        num_teeth: int,
+        num_points: int,
+        rng: np.random.Generator,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        with np.load(path) as sample:
+            if 'before_pts' in sample:
+                style_points = sample['before_pts']
+            elif 'style_pts' in sample:
+                style_points = sample['style_pts']
+            else:
+                raise KeyError(
+                    f'{path} must contain before_pts or style_pts.'
+                )
+            if 'mask' not in sample:
+                raise KeyError(f'{path} must contain mask.')
+            masks = sample['mask']
+
+        expected_shape = (num_teeth, num_points, 3)
+        if style_points.shape != expected_shape:
+            raise ValueError(
+                f'{path}: expected style shape {expected_shape}, '
+                f'got {style_points.shape}.'
+            )
+        if masks.shape != (num_teeth,):
+            raise ValueError(
+                f'{path}: expected mask shape {(num_teeth,)}, '
+                f'got {masks.shape}.'
+            )
+
+        style_points = style_points.astype(np.float32, copy=True)
+        masks = masks.astype(bool, copy=False)
+        missing_count = int((~masks).sum())
+        if missing_count:
+            style_points[~masks] = (
+                rng.random((missing_count, num_points, 3)) * 1e-6
+            )
+        return style_points, masks
+
+    @staticmethod
+    def _load_after(
+        path: Path,
+        num_teeth: int,
+        num_points: int,
+        rng: np.random.Generator,
+    ) -> np.ndarray:
+        if path.suffix.lower() == '.npz':
+            with np.load(path) as sample:
+                if 'after_pts' in sample:
+                    points = sample['after_pts']
+                elif 'points' in sample:
+                    points = sample['points']
+                else:
+                    raise KeyError(
+                        f'{path} must contain after_pts or points.'
+                    )
+        else:
+            points = read_pointcloud(str(path))
+
+        points = np.asarray(points)
+        expected_shape = (num_teeth, num_points, 3)
+        if points.shape == expected_shape:
+            return points.astype(np.float32, copy=False)
+        if points.ndim != 2 or points.shape[1] != 3:
+            raise ValueError(
+                f'{path}: expected merged [K,3] or {expected_shape}, '
+                f'got {points.shape}.'
+            )
+        if len(points) % num_points:
+            raise ValueError(
+                f'{path}: {len(points)} points cannot be split into '
+                f'{num_points}-point teeth.'
+            )
+
+        present_teeth = len(points) // num_points
+        if present_teeth > num_teeth:
+            raise ValueError(
+                f'{path}: contains {present_teeth} tooth blocks; '
+                f'maximum is {num_teeth}.'
+            )
+
+        if present_teeth < num_teeth:
+            logger.warning(
+                f'{path} is a merged PLY with {present_teeth} tooth blocks '
+                'but no tooth-position mask. It is usable for a quick test, '
+                'but anatomical slots are only approximate. Regenerate '
+                'Stage I samples to create the preferred same-name NPZ.'
+            )
+
+        # After geometry is consumed by a global point encoder, so padding
+        # slots do not encode anatomical positions. Preserve all PLY points
+        # in file order and fill unused slots with the training convention.
+        after_points = (
+            rng.random((num_teeth, num_points, 3)).astype(np.float32) * 1e-6
+        )
+        after_points[:present_teeth] = points.reshape(
+            present_teeth, num_points, 3
+        )
+        return after_points
+
+    @classmethod
+    def _paired_inputs(
+        cls,
+        style_dir: Path,
+        data_dir: Path,
+        rng: np.random.Generator,
+    ) -> List[Tuple[str, Path, Path]]:
+        style_files = sorted(
+            style_dir.glob('*.npz'),
+            key=cls._sort_key,
+        )
+        data_files = {}
+        for suffix in ('*.npz', '*.ply'):
+            for path in data_dir.glob(suffix):
+                data_files.setdefault(path.stem, path)
+
+        if not style_files:
+            raise FileNotFoundError(
+                f'No style NPZ files found in: {style_dir}'
+            )
+        if not data_files:
+            raise FileNotFoundError(
+                f'No data PLY or NPZ files found in: {data_dir}'
+            )
+
+        ordered_data = sorted(data_files.values(), key=cls._sort_key)
+        return [
+            (
+                data_file.stem,
+                style_files[int(rng.integers(len(style_files)))],
+                data_file,
+            )
+            for data_file in ordered_data
+        ]
+
+    def _generate_batch(
+        self,
+        style_points: torch.Tensor,
+        after_points: torch.Tensor,
+        masks: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        style_centers = style_points.mean(dim=-2)
+        predicted = self.transformer(
+            style_points,
+            style_centers,
+            after_points,
+            masks,
+        )
+        predicted = rearrange(
+            predicted, 'b p (l c) -> b l p c', c=9
+        )
+        batch_size, num_steps, num_teeth, _ = predicted.shape
+        rotations = rotation_6d_to_matrix(predicted[..., :6])
+        translations = predicted[..., 6:]
+
+        matrices = torch.zeros(
+            batch_size,
+            num_steps,
+            num_teeth,
+            4,
+            4,
+            device=style_points.device,
+            dtype=style_points.dtype,
+        )
+        matrices[..., :3, :3] = rotations
+        matrices[..., :3, 3] = translations
+        matrices[..., 3, 3] = 1
+
+        repeated_after = repeat(
+            after_points,
+            'b p n c -> (b l p) n c',
+            l=num_steps,
+        )
+        transforms = Transform3d(
+            matrix=rearrange(
+                matrices,
+                'b l p c1 c2 -> (b l p) c2 c1',
+            )
+        )
+        generated = transforms.transform_points(repeated_after)
+        generated = rearrange(
+            generated,
+            '(b l p) n c -> b l p n c',
+            b=batch_size,
+            l=num_steps,
+            p=num_teeth,
+        )
+        return generated[:, 0], matrices
+
+    @torch.inference_mode()
+    def generate(
+        self,
+        style_dir: str,
+        data_dir: str,
+        output_dir: str = 'stage_two_samples',
+        batch_size: int = 1,
+        num_teeth: int = 32,
+        num_points: int = 512,
+        seed: int = 3407,
+    ) -> None:
+        """Generate Stage II samples directly from two input directories."""
+        if batch_size <= 0:
+            raise ValueError('batch_size must be positive.')
+        style_path = Path(style_dir).expanduser().resolve()
+        data_path = Path(data_dir).expanduser().resolve()
+        output_path = Path(output_dir).expanduser().resolve()
+        if not style_path.is_dir():
+            raise FileNotFoundError(f'Style directory not found: {style_path}')
+        if not data_path.is_dir():
+            raise FileNotFoundError(f'Data directory not found: {data_path}')
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        rng = np.random.default_rng(seed)
+        pairs = self._paired_inputs(style_path, data_path, rng)
+        parameter = next(self.parameters())
+
+        with self.ema_scope():
+            for start in range(0, len(pairs), batch_size):
+                current_pairs = pairs[start:start + batch_size]
+                styles, afters, masks = [], [], []
+                for _, style_file, data_file in current_pairs:
+                    style, mask = self._load_style(
+                        style_file, num_teeth, num_points, rng
+                    )
+                    after = self._load_after(
+                        data_file, num_teeth, num_points, rng
+                    )
+                    styles.append(style)
+                    afters.append(after)
+                    masks.append(mask)
+
+                style_tensor = torch.as_tensor(
+                    np.stack(styles),
+                    device=parameter.device,
+                    dtype=parameter.dtype,
+                )
+                after_tensor = torch.as_tensor(
+                    np.stack(afters),
+                    device=parameter.device,
+                    dtype=parameter.dtype,
+                )
+                mask_tensor = torch.as_tensor(
+                    np.stack(masks),
+                    device=parameter.device,
+                    dtype=torch.bool,
+                )
+                generated, predicted_matrices = self._generate_batch(
+                    style_tensor, after_tensor, mask_tensor
+                )
+
+                for index, (stem, style_file, _) in enumerate(current_pairs):
+                    out_matrices = predicted_matrices[index].cpu().numpy()
+                    relative_matrices = np.tile(
+                        np.eye(4, dtype=out_matrices.dtype),
+                        (out_matrices.shape[0], num_teeth, 1, 1),
+                    )
+                    first_inverse = np.linalg.inv(out_matrices[0])
+                    for step in range(out_matrices.shape[0] - 1):
+                        relative_matrices[step] = (
+                            out_matrices[step + 1] @ first_inverse
+                        )
+                    relative_matrices[-1] = first_inverse
+
+                    np.savez(
+                        output_path / f'{stem}.npz',
+                        before_pts=generated[index].float().cpu().numpy(),
+                        after_pts=after_tensor[index].float().cpu().numpy(),
+                        style_pts=style_tensor[index].float().cpu().numpy(),
+                        mask=mask_tensor[index].cpu().numpy(),
+                        style_id=np.asarray(style_file.stem),
+                        matrices=relative_matrices,
+                        inv_matrices=out_matrices,
+                    )
     
     def on_test_start(self):
         self.num = 0
@@ -220,5 +504,3 @@ class MotionTransferSampler(pl.LightningModule):
         # points = torch.cat(points,dim=0)
         # write_pointcloud(points.cpu().numpy(), f'/data3/leics/dataset/teeth/synthetic_tmp/21.ply')    
         # exit()
-
-

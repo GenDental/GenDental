@@ -1,1 +1,1 @@
-from models.global_encoder.GlobalEncoder import GlobalEncoder
+from models.global_encoder.gpt import LatentGPT

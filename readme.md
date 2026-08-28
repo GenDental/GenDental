@@ -76,7 +76,13 @@ To train Stage I:
 bash scripts/train_stage_one.sh
 ```
 
-you need to modify the data path in configuration files.
+Runtime paths are configured in the script and can be overridden without
+editing YAML, for example:
+
+```shell
+DATA_PATH=/path/to/data INDEX_PATH=/path/to/splits \
+OUTPUT_DIR=/path/to/checkpoints bash scripts/train_stage_one.sh
+```
 
 
 
@@ -85,6 +91,13 @@ To get synthetic post-orthodontic data:
  ```shell
  bash scripts/test_stage_one.sh
  ```
+
+Stage I generation does not load a dataset:
+
+```shell
+CKPT_PATH=/path/to/ckpt OUTPUT_DIR=/path/to/generated \
+NUM_SAMPLES=100 BATCH_SIZE=8 bash scripts/test_stage_one.sh
+```
 
 
 
@@ -104,3 +117,32 @@ To get synthetic pre-orthodontic data:
 bash scripts/sample_stage_two.sh
  ```
 
+Stage II sampling reads directories directly and does not construct a
+DataLoader. For every file in gpt_samples it randomly selects one style NPZ
+from reference_data, so the output count always equals the data count:
+
+```shell
+STYLE_DIR=/path/to/reference_npz \
+DATA_DIR=/path/to/stage_one_samples \
+OUTPUT_DIR=/path/to/output \
+bash scripts/sample_stage_two.sh
+```
+
+Style files must be NPZ files containing before_pts and mask. Stage I now
+saves a structured NPZ beside each merged PLY; Stage II prefers this NPZ
+because it preserves all 32 anatomical tooth slots. Set SEED to make style
+selection reproducible; each output NPZ records the selected style_id.
+
+## Configuration overrides
+
+The entry point has explicit train, test, and generate modes. Any YAML field
+can be overridden repeatedly from a script:
+
+```shell
+python main.py --mode train --config configs/stage_one.yaml \
+  --set dataset.params.data_path=/path/to/data \
+  --set dataset.params.batch_size=8
+```
+
+Generate builds only the model and checkpoint; train and test also build the
+configured DataModule. The old test and sample flags remain supported.
