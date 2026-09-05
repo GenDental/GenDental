@@ -14,7 +14,7 @@ model:
         decoder_depth: 3
         num_groups: 33
         latent_dim: 256
-        share_encoder: true
+        share_encoder: false
         encoder_tooth_chunk_size: 4
         encoder_sa_blocks: [
           [[32, 2, 32], [256, 0.1, 32, [32, 64]]],
