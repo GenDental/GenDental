@@ -11,7 +11,9 @@ import pytorch_lightning as pl
 import torch
 from einops._torch_specific import allow_ops_in_compiled_graph
 from omegaconf import OmegaConf
-from pytorch_lightning.callbacks import Callback, ModelCheckpoint
+from pytorch_lightning.callbacks import (
+    Callback, LearningRateMonitor, ModelCheckpoint,
+)
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.strategies import DDPStrategy, DeepSpeedStrategy
 from pytorch_lightning.utilities import rank_zero_info
@@ -41,19 +43,53 @@ class SetupCallback(Callback):
             self.ckptdir.mkdir(parents=True, exist_ok=True)
 
 
+class SyncSchedulerMaxEpochs(Callback):
+    """Keep restored epoch schedulers aligned with Trainer.max_epochs."""
+
+    def on_train_start(self, trainer, pl_module):
+        # This hook runs after Lightning restores optimizer/scheduler state.
+        del pl_module
+        for scheduler_config in trainer.lr_scheduler_configs:
+            scheduler = scheduler_config.scheduler
+            if not hasattr(scheduler, "max_epochs"):
+                continue
+
+            old_max_epochs = int(scheduler.max_epochs)
+            new_max_epochs = int(trainer.max_epochs)
+            if old_max_epochs == new_max_epochs:
+                continue
+
+            warmup_epochs = int(getattr(scheduler, "warmup_epochs", 0))
+            if new_max_epochs <= warmup_epochs:
+                raise ValueError(
+                    "Trainer max_epochs must exceed scheduler warmup_epochs "
+                    f"({new_max_epochs} versus {warmup_epochs})."
+                )
+
+            scheduler.max_epochs = new_max_epochs
+            scheduler.step(epoch=trainer.current_epoch)
+            rank_zero_info(
+                "Updated scheduler max_epochs after checkpoint restore: "
+                f"{old_max_epochs} -> {new_max_epochs}; "
+                f"resumed_epoch={trainer.current_epoch}."
+            )
+
+
 def training_resources(config):
     """Create callbacks and logging only for training."""
     setup = SetupCallback(config.training.output_dir)
+    monitor = str(config.training.monitor)
     checkpoint = ModelCheckpoint(
         dirpath=setup.ckptdir,
-        filename="ckpt-{epoch}-{val_total_loss:.4f}",
-        monitor=config.training.monitor,
+        filename=f"ckpt-{{epoch}}-{{{monitor}:.6f}}",
+        monitor=monitor,
         mode="min",
         save_top_k=3,
         save_last=True,
     )
     logger = TensorBoardLogger(str(setup.logdir), name="tensorboard")
-    return [setup, checkpoint], logger
+    lr_monitor = LearningRateMonitor(logging_interval="epoch")
+    return [setup, SyncSchedulerMaxEpochs(), lr_monitor, checkpoint], logger
 
 
 def get_args():

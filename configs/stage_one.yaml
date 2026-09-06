@@ -50,7 +50,7 @@ model:
         eps: 1.0e-8
 
     scheduler_config:
-      module: pl_bolts.optimizers.lr_scheduler.LinearWarmupCosineAnnealingLR
+      module: utils.lr_scheduler.HorizonAwareWarmupCosineLR
       params:
         warmup_epochs: 10
         warmup_start_lr: 0.0
