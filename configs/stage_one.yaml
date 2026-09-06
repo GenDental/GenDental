@@ -1,48 +1,38 @@
 model:
-  module: models.global_encoder.gpt.LatentGPT
+  module: models.global_encoder.gpt_old.oldGPT
   params:
     transformer_config:
-      module: models.global_encoder.gpt_blocks.LatentGPTTransformer
+      module: models.global_encoder.gpt_blocks_old.old_transformer
       params:
         trans_dim: 768
         depth: 18
         drop_path_rate: 0.1
         num_heads: 8
-
         group_size: 512
         encoder_dims: 512
         decoder_depth: 3
         num_groups: 33
-        latent_dim: 256
-        share_encoder: false
-        encoder_tooth_chunk_size: 4
-        encoder_sa_blocks: [
-          [[32, 2, 32], [256, 0.1, 32, [32, 64]]],
-          [[64, 1, 16], [64, 0.2, 32, [64, 128]]]
-        ]
 
-        dropout: 0.1
-        attn_dropout: 0.05
-        mlp_ratio: 2.6666667
-
-        # Set according to the actual coordinate scale.
-        # Use 1.0 only when tooth centers are already around [-1, 1].
-        center_scale: 1.0
-
-        posterior_logvar_min: -8.0
-        posterior_logvar_max: 4.0
-        prior_logvar_min: -6.0
-        prior_logvar_max: 2.0
-        decoder_hidden_dim: 1024
-        # Direct causal-GPT correction of zero-mean local tooth geometry.
-        direct_point_residual_scale: 0.1
-
-        # Legacy compatibility arguments; ignored by the new model.
+        # Keep the old position-specific PointNet++ encoders and RVQ path.
         encoder_config: null
         style_dims: 2048
         codebook_size: 2048
         num_quantizers: 2
         codebook_dim: 1024
+        share_encoder: false
+        use_vq: true
+
+        dropout: 0.1
+        attn_dropout: 0.05
+        mlp_ratio: 4.0
+        center_scale: 1.0
+        position_dropout: 0.0
+
+        # One noise vector is shared by all 32 teeth in a generated arch.
+        # The zero-initialized residual keeps initial behavior identical to
+        # the deterministic old decoder.
+        generation_noise_dim: 64
+        generation_noise_scale: 0.03
 
     optimizer_config:
       module: torch.optim.AdamW
@@ -58,39 +48,27 @@ model:
         warmup_start_lr: 0.0
         eta_min: 1.0e-7
 
-    use_ema: false
-
-    posterior_reconstruction_weight: 1.0
-    # Strong direct geometry supervision for the GPT-conditioned prior path.
-    prior_reconstruction_weight: 1.0
-    latent_prior_kl_weight: 0.1
-    posterior_standard_kl_weight: 0.0001
-    kl_warmup_epochs: 50
-    latent_prior_free_bits: 0.02
-    posterior_standard_free_bits: 0.0
-    center_loss_weight: 1.0
-    mask_weight: 1.0
-    # Class order is [missing, present]. Re-estimate this from the actual
-    # training split if its missing/present ratio changes.
-    mask_class_weights: [2.0, 1.0]
-    chamfer_l2_weight: 0.5
-    chamfer_l1_weight: 1.0
-
+    use_ema: true
+    # Two candidates limit the extra Chamfer memory while making the noise
+    # branch useful through a whole-arch best-of-K reconstruction objective.
+    generation_num_candidates: 2
     test_output_dir: ./gpt_samples
-    num_test_generations: 83
-    max_test_samples: 830
-    save_merged: True
-
-    # Sampling strengths at test time.
-    latent_temperature: 1.0
-    # Kept only for backward compatibility; centers are deterministic now.
-    center_temperature: 0.0
-    mask_temperature: 0.8
+    num_test_generations: 1
+    max_test_samples: 2000
+    save_merged: true
+    missing_point_eps: 1.0e-6
 
 dataset:
   module: dataset.teeth_dataset.TeethDataManager
   params:
-    data_path: /data3/leics/dataset/teeth/guangdong_all2
-    index_path: "files/guangdong"
+    data_path: /data3/leics/dataset/teeth/sample512_merged
+    index_path: files/zj
     batch_size: 16
     with_normals: false
+
+generation:
+  output_dir: ./gpt_samples
+  num_samples: 200
+  batch_size: 16
+  save_merged: true
+  seed: 3407

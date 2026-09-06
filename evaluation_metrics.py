@@ -498,7 +498,7 @@ if __name__=='__main__':
 
 
     ref_dataroot = '/data3/leics/dataset/teeth/sample512_merged'
-    syn_dataroot = '/data3/leics/dataset/GenDental/zj_synthetic_samples'
+    syn_dataroot = '/data3/leics/dataset/GenDental/zj_old_stochastic_samples'
     num = 200
     num_points = 128
     a = np.zeros([num, 32, num_points, 3])

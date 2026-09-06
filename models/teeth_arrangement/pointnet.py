@@ -109,14 +109,22 @@ class get_loss(nn.Module):
         return total_loss
 
 class PointNet(nn.Module):
-    def __init__(self, global_feat=True, feature_transform=False, channel=3, final_dim = 1024):
+    def __init__(
+        self,
+        global_feat=True,
+        feature_transform=False,
+        channel=3,
+        first_dim=64,
+        second_dim=128,
+        final_dim=1024,
+    ):
         super(PointNet, self).__init__()
         self.stn = STN3d(channel)
-        self.conv1 = torch.nn.Conv1d(channel, 64, 1)
-        self.conv2 = torch.nn.Conv1d(64, 128, 1)
-        self.conv3 = torch.nn.Conv1d(128, final_dim, 1)
-        self.bn1 = nn.BatchNorm1d(64)
-        self.bn2 = nn.BatchNorm1d(128)
+        self.conv1 = torch.nn.Conv1d(channel, first_dim, 1)
+        self.conv2 = torch.nn.Conv1d(first_dim, second_dim, 1)
+        self.conv3 = torch.nn.Conv1d(second_dim, final_dim, 1)
+        self.bn1 = nn.BatchNorm1d(first_dim)
+        self.bn2 = nn.BatchNorm1d(second_dim)
         self.bn3 = nn.BatchNorm1d(final_dim)
         self.final_dim = final_dim
         self.global_feat = global_feat

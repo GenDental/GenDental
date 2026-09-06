@@ -14,11 +14,10 @@ import math
 import torch.nn.functional as F
 from utils import instantiate_from_config
 from torch_ema import ExponentialMovingAverage as EMA
-from models.transformer import *
 from utils import instantiate_from_config, instantiate_non_trainable_model
 from utils import write_pointcloud
 import torch.nn.init as init
-from typing import Dict
+from typing import Dict, Optional
 
 def remove_prefix_from_state_dict(state_dict, prefix="GPT_Transformer."):
     new_state_dict = {}
@@ -31,14 +30,34 @@ def remove_prefix_from_state_dict(state_dict, prefix="GPT_Transformer."):
     return new_state_dict
 
 class oldGPT(pl.LightningModule):
-    def __init__(self, transformer_config, optimizer_config=None, scheduler_config=None, use_ema=True):
+    def __init__(
+        self,
+        transformer_config,
+        optimizer_config=None,
+        scheduler_config=None,
+        use_ema=True,
+        generation_num_candidates: int = 4,
+        test_output_dir: str = "./gpt_samples",
+        num_test_generations: int = 1,
+        max_test_samples: int = 2000,
+        save_merged: bool = True,
+        missing_point_eps: float = 1e-6,
+    ):
         super().__init__()
-        # self.quantizer = instantiate_non_trainable_model(quantizer_config)
         self.transformer = instantiate_from_config(transformer_config)
-        self.use_ema = use_ema
+        self.use_ema = bool(use_ema)
         self.optimizer_config = optimizer_config
         self.scheduler_config = scheduler_config
-        self.sos_token = nn.Parameter(torch.zeros(1024))
+        self.generation_num_candidates = int(generation_num_candidates)
+        if self.generation_num_candidates <= 0:
+            raise ValueError("generation_num_candidates must be positive.")
+        self.test_output_dir = str(test_output_dir)
+        self.num_test_generations = int(num_test_generations)
+        self.max_test_samples = int(max_test_samples)
+        self.save_merged = bool(save_merged)
+        self.missing_point_eps = float(missing_point_eps)
+        if self.missing_point_eps <= 0:
+            raise ValueError("missing_point_eps must be positive.")
         if self.use_ema:
             self.ema_model = EMA(self.transformer.parameters(), decay=0.9999)
     
@@ -60,93 +79,211 @@ class oldGPT(pl.LightningModule):
             self.ema_model.to(self.device)
 
 
+    @staticmethod
+    def _unpack_batch(batch):
+        if len(batch) == 4:
+            index, before_pts, after_pts, masks = batch
+        elif len(batch) == 6:
+            (
+                index,
+                before_pts,
+                after_pts,
+                before_normals,
+                after_normals,
+                masks,
+            ) = batch
+            del before_normals, after_normals
+        else:
+            raise ValueError(
+                "oldGPT expects a 4-item point batch or a 6-item batch "
+                f"with normals, received {len(batch)} items."
+            )
+        del index, before_pts
+        return after_pts, masks.bool()
+
     def forward(self, batch):
-        index, before_pts, after_pts, before_normals, after_normals,  masks = batch
+        after_pts, masks = self._unpack_batch(batch)
         center = after_pts.mean(dim=-2)
-        rec_pts, predicted_masks, commit_loss = self.transformer(after_pts, center)
-        # codes = rearrange(codes,'n2 b n1 c -> b (n1 n2) c')
+        batch_size = after_pts.shape[0]
 
-        gt_masks = masks.flatten().long()
+        if self.training:
+            generation_noise = None
+            num_candidates = self.generation_num_candidates
+        else:
+            noise_dim = (
+                self.transformer.generator_blocks.generation_noise_dim
+            )
+            generation_noise = after_pts.new_zeros(batch_size, noise_dim)
+            num_candidates = 1
 
-        criterion = nn.CrossEntropyLoss()
-        # criterion = nn.MSELoss()
-        rec_pts = rec_pts[:,:-1]
+        rec_pts, predicted_masks, commit_loss = self.transformer(
+            after_pts,
+            center,
+            generation_noise=generation_noise,
+            num_candidates=num_candidates,
+        )
+        if rec_pts.ndim == 4:
+            rec_pts = rec_pts.unsqueeze(0)
+        if rec_pts.ndim != 5:
+            raise ValueError(
+                "Expected reconstructed points with shape "
+                "[K, B, N+1, P, 3]."
+            )
 
-        predicted_masks = predicted_masks[:,:-1].reshape(-1,2)
-        loss3 = criterion(predicted_masks,gt_masks)
+        rec_candidates = rec_pts[:, :, :-1]
+        candidate_count, _, num_teeth, num_points, _ = (
+            rec_candidates.shape
+        )
+        expanded_gt = after_pts.unsqueeze(0).expand(
+            candidate_count, -1, -1, -1, -1
+        )
+        flat_rec = rec_candidates.reshape(
+            candidate_count * batch_size * num_teeth,
+            num_points,
+            3,
+        )
+        flat_gt = expanded_gt.reshape_as(flat_rec)
 
-        result_masks = (masks).to(torch.float).flatten()
-        gt_points = rearrange(after_pts,'b n p c -> (b n) p c')
-        rec = rearrange(rec_pts,'b n p c -> (b n) p c')
-        loss1 = chamfer_distance(rec,gt_points,norm=2,batch_reduction=None,point_reduction='sum')[0]
-        loss2 = chamfer_distance(rec,gt_points,norm=1,batch_reduction=None,point_reduction='sum')[0]
-        predicted_centers = rec_pts.mean(dim=-2)
-        target_centers = after_pts.mean(dim=-2)
+        chamfer_l2 = chamfer_distance(
+            flat_rec,
+            flat_gt,
+            norm=2,
+            batch_reduction=None,
+            point_reduction="sum",
+        )[0].reshape(candidate_count, batch_size, num_teeth)
+        chamfer_l1 = chamfer_distance(
+            flat_rec,
+            flat_gt,
+            norm=1,
+            batch_reduction=None,
+            point_reduction="sum",
+        )[0].reshape(candidate_count, batch_size, num_teeth)
 
+        predicted_centers = rec_candidates.mean(dim=-2)
+        target_centers = center.unsqueeze(0)
         center_error = F.smooth_l1_loss(
             predicted_centers,
-            target_centers,
+            target_centers.expand_as(predicted_centers),
             reduction="none",
         ).mean(dim=-1)
 
-        center_error = center_error.flatten()
-
-        center_loss = (
-            (center_error * result_masks).sum()
-            / result_masks.sum().clamp_min(1.0)
+        valid = masks.to(rec_candidates.dtype).unsqueeze(0)
+        valid_per_sample = valid.sum(dim=-1).clamp_min(1.0)
+        candidate_scores = (
+            ((chamfer_l2 + chamfer_l1 + center_error) * valid).sum(dim=-1)
+            / valid_per_sample
         )
-        
+        best_candidate = candidate_scores.argmin(dim=0)
+        batch_indices = torch.arange(batch_size, device=after_pts.device)
 
-        loss1 = (loss1  * result_masks).sum() / result_masks.sum()
-        loss2 = (loss2  * result_masks).sum() / result_masks.sum()
-        loss = loss1 + loss2 + loss3 + commit_loss.mean() + center_loss
+        selected_l2 = chamfer_l2[best_candidate, batch_indices]
+        selected_l1 = chamfer_l1[best_candidate, batch_indices]
+        selected_center = center_error[best_candidate, batch_indices]
+        selected_points = rec_candidates[best_candidate, batch_indices]
 
-        return loss
-    
+        flat_valid = masks.to(selected_l2.dtype)
+        valid_count = flat_valid.sum().clamp_min(1.0)
+        loss_l2 = (selected_l2 * flat_valid).sum() / valid_count
+        loss_l1 = (selected_l1 * flat_valid).sum() / valid_count
+        center_loss = (
+            (selected_center * flat_valid).sum() / valid_count
+        )
+
+        predicted_masks = predicted_masks[:, :-1].reshape(-1, 2)
+        mask_loss = F.cross_entropy(
+            predicted_masks,
+            masks.reshape(-1).long(),
+        )
+        commit_loss = commit_loss.mean()
+        loss = loss_l2 + loss_l1 + mask_loss + commit_loss + center_loss
+
+        if candidate_count > 1:
+            candidate_spread = (
+                rec_candidates
+                - rec_candidates.mean(dim=0, keepdim=True)
+            ).square().mean().sqrt()
+        else:
+            candidate_spread = loss.new_zeros(())
+
+        return {
+            "loss": loss,
+            "chamfer_l2": loss_l2,
+            "chamfer_l1": loss_l1,
+            "center_loss": center_loss,
+            "mask_loss": mask_loss,
+            "commit_loss": commit_loss,
+            "candidate_spread": candidate_spread,
+            "reconstruction": selected_points,
+        }
+
     def on_save_checkpoint(self, checkpoint):
-        checkpoint['ema_state'] = self.ema_model.state_dict()
+        if self.use_ema:
+            checkpoint["ema_state"] = self.ema_model.state_dict()
 
     def on_load_checkpoint(self, checkpoint):
-        if 'ema_state' in checkpoint:
-            self.ema_model.load_state_dict(checkpoint['ema_state'])
-    
+        if self.use_ema and "ema_state" in checkpoint:
+            self.ema_model.load_state_dict(checkpoint["ema_state"])
+
     @contextmanager
     def ema_scope(self, context=None):
         if self.use_ema:
-            self.ema_model.store(self.gpt_transformer.parameters())
-            self.ema_model.copy_to(self.gpt_transformer.parameters())
+            self.ema_model.store(self.transformer.parameters())
+            self.ema_model.copy_to(self.transformer.parameters())
             if context is not None:
                 print(f"{context}: Switched to EMA weights")
         try:
             yield None
         finally:
             if self.use_ema:
-                self.ema_model.restore(self.gpt_transformer.parameters())
+                self.ema_model.restore(self.transformer.parameters())
                 if context is not None:
                     print(f"{context}: Restored training weights")
-    
-    def training_step(self, batch, batch_idx):
-        loss = self.forward(batch)
-        split = 'train'
-        loss_dict = {
-            f"{split}_total_loss": loss.detach(),
-            f"{split}_lr_abs": self.optimizers().param_groups[0]['lr'],
-        }
-        self.log_dict(loss_dict, prog_bar=True, logger=True, sync_dist=False, rank_zero_only=True)
+
+    def on_train_batch_end(self, outputs, batch, batch_idx):
+        del outputs, batch, batch_idx
         if self.use_ema:
             self.ema_model.update()
 
-        return loss
-    
-    def validation_step(self, batch, batch_idx):
-        loss = self.forward(batch)
-        split = 'val'
-        loss_dict = {
-            f"{split}_total_loss": loss.detach(),
-        }
-        self.log_dict(loss_dict, prog_bar=True, logger=True, sync_dist=False, rank_zero_only=True)
+    def on_validation_start(self):
+        if self.use_ema:
+            self.ema_model.store(self.transformer.parameters())
+            self.ema_model.copy_to(self.transformer.parameters())
 
-        return loss
+    def on_validation_end(self):
+        if self.use_ema:
+            self.ema_model.restore(self.transformer.parameters())
+
+    def _log_losses(self, output, stage):
+        values = {
+            f"{stage}_total_loss": output["loss"],
+            f"{stage}_chamfer_l2": output["chamfer_l2"],
+            f"{stage}_chamfer_l1": output["chamfer_l1"],
+            f"{stage}_center_loss": output["center_loss"],
+            f"{stage}_mask_loss": output["mask_loss"],
+            f"{stage}_commit_loss": output["commit_loss"],
+            f"{stage}_candidate_spread": output["candidate_spread"],
+        }
+        self.log_dict(
+            values,
+            prog_bar=True,
+            logger=True,
+            on_step=(stage == "train"),
+            on_epoch=True,
+            sync_dist=True,
+            batch_size=output["reconstruction"].shape[0],
+        )
+
+    def training_step(self, batch, batch_idx):
+        del batch_idx
+        output = self.forward(batch)
+        self._log_losses(output, "train")
+        return output["loss"]
+
+    def validation_step(self, batch, batch_idx):
+        del batch_idx
+        output = self.forward(batch)
+        self._log_losses(output, "val")
+        return output["loss"]
     
     # def on_test_start(self):
     #     self.num = 0
@@ -196,31 +333,8 @@ class oldGPT(pl.LightningModule):
 
 
     def on_test_start(self) -> None:
-        """
-        Initialize autoregressive point-cloud generation.
-
-        Missing teeth in the dataset are represented by tiny random points
-        rather than exact zeros. Generation follows the same convention when
-        an absent tooth is fed back as context.
-        """
         self.num = 0
-
-        self.test_output_dir = "/data3/leics/dataset/teeth/tmp2/"
         os.makedirs(self.test_output_dir, exist_ok=True)
-
-        # Maximum number of samples saved by each process.
-        self.max_test_samples = 2000
-
-        # The current point decoder is deterministic, so repeated generation
-        # normally produces the same result.
-        self.num_test_generations = 1
-
-        # True: merge all valid teeth in one sample into a single PLY.
-        # False: save each valid tooth as a separate PLY.
-        self.save_merged = True
-
-        # Keep this consistent with the dataset representation of missing teeth.
-        self.missing_point_eps = 1e-6
 
     @torch.inference_mode()
     def autoregressive_generate(
@@ -230,6 +344,7 @@ class oldGPT(pl.LightningModule):
         num_points: int,
         device: torch.device,
         dtype: torch.dtype,
+        generator: Optional[torch.Generator] = None,
     ) -> Dict[str, torch.Tensor]:
         """
         GPT-style next-token generation.
@@ -261,6 +376,7 @@ class oldGPT(pl.LightningModule):
                 3,
                 device=device,
                 dtype=dtype,
+                generator=generator,
             )
             * self.missing_point_eps
         )
@@ -283,11 +399,20 @@ class oldGPT(pl.LightningModule):
             device=device,
             dtype=dtype,
         )
+        noise_dim = self.transformer.generator_blocks.generation_noise_dim
+        generation_noise = torch.randn(
+            batch_size,
+            noise_dim,
+            device=device,
+            dtype=dtype,
+            generator=generator,
+        )
 
         for tooth_index in range(num_teeth):
             all_predicted_points, all_predicted_masks, _ = self.transformer(
                 context_points,
                 context_centers,
+                generation_noise=generation_noise,
             )
 
             expected_output_length = num_teeth + 1
@@ -319,9 +444,12 @@ class oldGPT(pl.LightningModule):
             # Match the training dataset:
             # valid tooth   -> feed back its generated geometry
             # missing tooth -> feed back tiny random points, not exact zeros
-            missing_points = (
-                torch.rand_like(next_points) * self.missing_point_eps
-            )
+            missing_points = torch.rand(
+                next_points.shape,
+                device=next_points.device,
+                dtype=next_points.dtype,
+                generator=generator,
+            ) * self.missing_point_eps
             feedback_points = torch.where(
                 next_mask[:, None, None],
                 next_points,
@@ -338,6 +466,85 @@ class oldGPT(pl.LightningModule):
             "context_points": context_points,
             "context_centers": context_centers,
         }
+
+    @torch.inference_mode()
+    def generate(
+        self,
+        output_dir: Optional[str] = None,
+        num_samples: int = 1,
+        batch_size: int = 1,
+        save_merged: Optional[bool] = None,
+        seed: int = 3407,
+    ) -> None:
+        """Generate structured samples without constructing a DataLoader."""
+        if num_samples <= 0 or batch_size <= 0:
+            raise ValueError("num_samples and batch_size must be positive.")
+
+        output_dir = output_dir or self.test_output_dir
+        save_merged = (
+            self.save_merged if save_merged is None else bool(save_merged)
+        )
+        os.makedirs(output_dir, exist_ok=True)
+
+        parameter = next(self.transformer.parameters())
+        generator = torch.Generator(device=parameter.device)
+        generator.manual_seed(int(seed))
+        num_teeth = self.transformer.num_teeth
+        num_points = self.transformer.group_size
+
+        saved = 0
+        with self.ema_scope():
+            while saved < num_samples:
+                current_batch = min(batch_size, num_samples - saved)
+                generated = self.autoregressive_generate(
+                    batch_size=current_batch,
+                    num_teeth=num_teeth,
+                    num_points=num_points,
+                    device=parameter.device,
+                    dtype=parameter.dtype,
+                    generator=generator,
+                )
+
+                for batch_index in range(current_batch):
+                    sample_index = saved + batch_index
+                    points = generated["points"][batch_index]
+                    mask = generated["masks"][batch_index]
+                    structured_points = points.clone()
+                    missing_count = int((~mask).sum().item())
+                    if missing_count:
+                        structured_points[~mask] = torch.rand(
+                            missing_count,
+                            num_points,
+                            3,
+                            device=points.device,
+                            dtype=points.dtype,
+                            generator=generator,
+                        ) * self.missing_point_eps
+
+                    np.savez(
+                        os.path.join(output_dir, f"{sample_index}.npz"),
+                        after_pts=structured_points.float().cpu().numpy(),
+                        mask=mask.cpu().numpy(),
+                    )
+
+                    if save_merged:
+                        if mask.any():
+                            write_pointcloud(
+                                points[mask].reshape(-1, 3).float().cpu().numpy(),
+                                os.path.join(output_dir, f"{sample_index}.ply"),
+                            )
+                    else:
+                        for tooth_index in range(num_teeth):
+                            if not mask[tooth_index]:
+                                continue
+                            write_pointcloud(
+                                points[tooth_index].float().cpu().numpy(),
+                                os.path.join(
+                                    output_dir,
+                                    f"{sample_index}_{tooth_index}.ply",
+                                ),
+                            )
+                saved += current_batch
 
     def test_step(
         self,

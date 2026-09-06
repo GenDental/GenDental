@@ -267,12 +267,20 @@ class GPT_generator(nn.Module):
         trans_dim: int,
         group_size: int,
         dropout: float = 0.0,
+        generation_noise_dim: int = 64,
+        generation_noise_scale: float = 0.03,
     ) -> None:
         super().__init__()
         del embed_dim, num_heads
 
         self.trans_dim = trans_dim
         self.group_size = group_size
+        self.generation_noise_dim = int(generation_noise_dim)
+        self.generation_noise_scale = float(generation_noise_scale)
+        if self.generation_noise_dim <= 0:
+            raise ValueError("generation_noise_dim must be positive.")
+        if self.generation_noise_scale < 0:
+            raise ValueError("generation_noise_scale must be non-negative.")
 
         self.increase_dim = PredictionHead(
             input_dim=trans_dim,
@@ -289,21 +297,99 @@ class GPT_generator(nn.Module):
             hidden_dim=trans_dim,
             dropout=dropout,
         )
+        self.noise_projection = nn.Sequential(
+            nn.Linear(self.generation_noise_dim, trans_dim),
+            nn.SiLU(),
+            nn.Linear(trans_dim, trans_dim),
+        )
+        self.noise_residual = PredictionHead(
+            input_dim=2 * trans_dim,
+            output_dim=3 * group_size,
+            depth=max(num_layers, 1),
+            hidden_dim=3 * group_size,
+            dropout=dropout,
+        )
+
+    def reset_stochastic_output(self) -> None:
+        '''Start from the exact deterministic old-model prediction.'''
+        last_layer = self.noise_residual.net[-1]
+        if not isinstance(last_layer, nn.Linear):
+            raise TypeError("The stochastic residual must end with nn.Linear.")
+        nn.init.zeros_(last_layer.weight)
+        nn.init.zeros_(last_layer.bias)
 
     def forward(
         self,
         h: torch.Tensor,
+        generation_noise: Optional[torch.Tensor] = None,
+        num_candidates: int = 1,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         batch_size, sequence_length, _ = h.shape
+        if num_candidates <= 0:
+            raise ValueError("num_candidates must be positive.")
 
-        rebuild_points = self.increase_dim(h).reshape(
+        base_points = self.increase_dim(h)
+        if generation_noise is None:
+            generation_noise = torch.randn(
+                num_candidates,
+                batch_size,
+                self.generation_noise_dim,
+                device=h.device,
+                dtype=h.dtype,
+            )
+        elif generation_noise.ndim == 2:
+            generation_noise = generation_noise.unsqueeze(0)
+        elif generation_noise.ndim != 3:
+            raise ValueError(
+                "generation_noise must have shape [B, D] or [K, B, D]."
+            )
+
+        if generation_noise.shape[1:] != (
+            batch_size,
+            self.generation_noise_dim,
+        ):
+            raise ValueError(
+                "generation_noise has incompatible shape: "
+                f"{tuple(generation_noise.shape)}."
+            )
+
+        candidate_count = generation_noise.shape[0]
+        noise_features = self.noise_projection(generation_noise)
+        noise_features = noise_features[:, :, None, :].expand(
+            -1, -1, sequence_length, -1
+        )
+        hidden_features = h[None].expand(
+            candidate_count, -1, -1, -1
+        )
+        residual_inputs = torch.cat(
+            [hidden_features, noise_features],
+            dim=-1,
+        ).reshape(
+            candidate_count * batch_size,
+            sequence_length,
+            2 * self.trans_dim,
+        )
+        point_residual = self.noise_residual(residual_inputs).reshape(
+            candidate_count,
+            batch_size,
+            sequence_length,
+            3 * self.group_size,
+        )
+        candidate_points = (
+            base_points[None]
+            + self.generation_noise_scale * torch.tanh(point_residual)
+        ).reshape(
+            candidate_count,
             batch_size,
             sequence_length,
             self.group_size,
             3,
         )
+
         predicted_masks = self.eos_predictor(h)
-        return rebuild_points, predicted_masks
+        if candidate_count == 1:
+            return candidate_points[0], predicted_masks
+        return candidate_points, predicted_masks
 
 
 class old_transformer(nn.Module):
@@ -352,6 +438,8 @@ class old_transformer(nn.Module):
         use_vq: bool = True,
         center_scale: float = 1.0,
         position_dropout: float = 0.0,
+        generation_noise_dim: int = 64,
+        generation_noise_scale: float = 0.03,
     ) -> None:
         super().__init__()
         del encoder_config, style_dims
@@ -445,6 +533,8 @@ class old_transformer(nn.Module):
             trans_dim=self.trans_dim,
             group_size=self.group_size,
             dropout=dropout,
+            generation_noise_dim=generation_noise_dim,
+            generation_noise_scale=generation_noise_scale,
         )
 
         # A persistent causal mask moves with the module and is not stored in
@@ -470,6 +560,7 @@ class old_transformer(nn.Module):
         trunc_normal_(self.sos_token, std=0.02)
         trunc_normal_(self.sos_center_embedding, std=0.02)
         trunc_normal_(self.sequence_position, std=0.02)
+        self.generator_blocks.reset_stochastic_output()
 
         self._rescale_residual_projections()
 
@@ -542,6 +633,8 @@ class old_transformer(nn.Module):
         neighborhood: torch.Tensor,
         center: torch.Tensor,
         classify: bool = False,
+        generation_noise: Optional[torch.Tensor] = None,
+        num_candidates: int = 1,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         self._validate_inputs(neighborhood, center)
         batch_size = neighborhood.shape[0]
@@ -614,7 +707,9 @@ class old_transformer(nn.Module):
         )
 
         generated_points, predicted_masks = self.generator_blocks(
-            encoded_features
+            encoded_features,
+            generation_noise=generation_noise,
+            num_candidates=num_candidates,
         )
 
         return generated_points, predicted_masks, commit_loss
