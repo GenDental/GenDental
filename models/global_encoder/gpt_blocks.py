@@ -396,6 +396,7 @@ class LatentGPTTransformer(nn.Module):
         prior_logvar_min: float = -6.0,
         prior_logvar_max: float = 2.0,
         decoder_hidden_dim: Optional[int] = None,
+        direct_point_residual_scale: float = 0.1,
         missing_point_noise_scale: float = 1e-6,
     ) -> None:
         super().__init__()
@@ -419,6 +420,13 @@ class LatentGPTTransformer(nn.Module):
         self.posterior_logvar_max = float(posterior_logvar_max)
         self.prior_logvar_min = float(prior_logvar_min)
         self.prior_logvar_max = float(prior_logvar_max)
+        self.direct_point_residual_scale = float(
+            direct_point_residual_scale
+        )
+        if self.direct_point_residual_scale < 0:
+            raise ValueError(
+                "direct_point_residual_scale must be non-negative."
+            )
         self.missing_point_noise_scale = float(missing_point_noise_scale)
         if self.missing_point_noise_scale <= 0:
             raise ValueError("missing_point_noise_scale must be positive.")
@@ -484,6 +492,15 @@ class LatentGPTTransformer(nn.Module):
             depth=2,
             dropout=dropout,
         )
+        # Let the causal GPT state directly correct local tooth geometry while
+        # the sampled prior latent continues to provide stochastic variation.
+        self.context_point_residual_head = MLPHead(
+            input_dim=trans_dim,
+            output_dim=group_size * 3,
+            hidden_dim=decoder_hidden_dim,
+            depth=decoder_depth,
+            dropout=dropout,
+        )
 
         # Deterministic center prediction in normalized coordinates.
         # Center uncertainty is intentionally not learned: an unconstrained
@@ -515,6 +532,7 @@ class LatentGPTTransformer(nn.Module):
         trunc_normal_(self.missing_token, std=0.02)
         trunc_normal_(self.sequence_position, std=0.02)
         self._initialize_logvar_biases()
+        self._initialize_context_point_residual()
         self._rescale_residual_projections(depth)
 
     @staticmethod
@@ -544,6 +562,14 @@ class LatentGPTTransformer(nn.Module):
         prior_last = self.prior_logvar_head.net[-1]
         if isinstance(prior_last, nn.Linear) and prior_last.bias is not None:
             nn.init.constant_(prior_last.bias, -2.0)
+
+    def _initialize_context_point_residual(self) -> None:
+        # Start exactly from the latent decoder behavior. The direct GPT path
+        # is learned gradually instead of perturbing geometry at initialization.
+        last_layer = self.context_point_residual_head.net[-1]
+        if isinstance(last_layer, nn.Linear):
+            nn.init.zeros_(last_layer.weight)
+            nn.init.zeros_(last_layer.bias)
 
     def _rescale_residual_projections(self, depth: int) -> None:
         residual_std = 0.02 / math.sqrt(2.0 * depth)
@@ -771,6 +797,31 @@ class LatentGPTTransformer(nn.Module):
             "mask_logits": mask_logits,
         }
 
+    def decode_prior_local_points(
+        self,
+        prior_latent: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        """Decode latent shape and add a direct causal-GPT point residual."""
+        if prior_latent.shape[:2] != hidden_states.shape[:2]:
+            raise ValueError(
+                "prior_latent and hidden_states must share [B, N]."
+            )
+        base_points = self.point_decoder(prior_latent)
+        batch_size, num_teeth = prior_latent.shape[:2]
+        residual = self.context_point_residual_head(hidden_states).reshape(
+            batch_size,
+            num_teeth,
+            self.group_size,
+            3,
+        )
+        residual = torch.tanh(residual)
+        residual = residual - residual.mean(dim=2, keepdim=True)
+        local_points = (
+            base_points + self.direct_point_residual_scale * residual
+        )
+        return local_points - local_points.mean(dim=2, keepdim=True)
+
     def forward(
         self,
         neighborhood: torch.Tensor,
@@ -807,6 +858,9 @@ class LatentGPTTransformer(nn.Module):
             "center_mu_normalized"
         ][:, : self.num_teeth]
         mask_logits = prior_output["mask_logits"][:, : self.num_teeth]
+        prior_hidden_states = prior_output[
+            "hidden_states"
+        ][:, : self.num_teeth]
 
         posterior_local_points = self.point_decoder(posterior_z)
         posterior_reconstruction = (
@@ -815,7 +869,10 @@ class LatentGPTTransformer(nn.Module):
 
         # Decode the prior mean for a stable geometry loss. At test time we
         # sample from the prior instead.
-        prior_local_points = self.point_decoder(prior_mu)
+        prior_local_points = self.decode_prior_local_points(
+            prior_mu,
+            prior_hidden_states,
+        )
         prior_centers = center_mu_normalized * self.center_scale
         prior_reconstruction = (
             prior_local_points + prior_centers[:, :, None, :]
@@ -931,8 +988,9 @@ class LatentGPTTransformer(nn.Module):
             else:
                 sampled_mask = mask_logits.argmax(dim=-1).bool()
 
-            local_points = self.point_decoder(
-                sampled_latent[:, None, :]
+            local_points = self.decode_prior_local_points(
+                sampled_latent[:, None, :],
+                prior_output["hidden_states"][:, tooth_index : tooth_index + 1],
             )[:, 0]
             points = local_points + sampled_center[:, None, :]
 

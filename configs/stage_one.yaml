@@ -34,6 +34,8 @@ model:
         prior_logvar_min: -6.0
         prior_logvar_max: 2.0
         decoder_hidden_dim: 1024
+        # Direct causal-GPT correction of zero-mean local tooth geometry.
+        direct_point_residual_scale: 0.1
 
         # Legacy compatibility arguments; ignored by the new model.
         encoder_config: null
@@ -59,10 +61,8 @@ model:
     use_ema: false
 
     posterior_reconstruction_weight: 1.0
-    # The prior is primarily matched to the posterior through KL. A weaker
-    # mean-reconstruction term avoids forcing a multimodal prior to regress an
-    # over-smoothed average tooth.
-    prior_reconstruction_weight: 0.25
+    # Strong direct geometry supervision for the GPT-conditioned prior path.
+    prior_reconstruction_weight: 1.0
     latent_prior_kl_weight: 0.1
     posterior_standard_kl_weight: 0.0001
     kl_warmup_epochs: 50
@@ -73,8 +73,8 @@ model:
     # Class order is [missing, present]. Re-estimate this from the actual
     # training split if its missing/present ratio changes.
     mask_class_weights: [2.0, 1.0]
-    chamfer_l2_weight: 1.0
-    chamfer_l1_weight: 0.0
+    chamfer_l2_weight: 0.5
+    chamfer_l1_weight: 1.0
 
     test_output_dir: ./gpt_samples
     num_test_generations: 83
