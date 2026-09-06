@@ -6,7 +6,7 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
 OUTPUT_DIR="${OUTPUT_DIR:-/data3/leics/dataset/checkpoints/ToothWise/stage_one_zj_old_stochastic}"
 DATA_PATH="${DATA_PATH:-/data3/leics/dataset/teeth/sample512_merged}"
 INDEX_PATH="${INDEX_PATH:-files/zj}"
-EPOCHS="${EPOCHS:-500}"
+EPOCHS="${EPOCHS:-1000}"
 BASE_LR="${BASE_LR:-1e-4}"
 BATCH_SIZE="${BATCH_SIZE:-16}"
 

@@ -3,7 +3,7 @@ set -euo pipefail
 source "$(dirname -- "${BASH_SOURCE[0]}")/_common.sh"
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-6,7}"
-OUTPUT_DIR="${OUTPUT_DIR:-/data3/leics/dataset/checkpoints/ToothWise/tmp}"
+OUTPUT_DIR="${OUTPUT_DIR:-/data3/leics/dataset/checkpoints/GenDental/PSTN}"
 CKPT_PATH="${CKPT_PATH:-/data3/leics/dataset/checkpoints/ToothWise/PSTN_zj/ckpt/last-v1.ckpt}"
 DATA_PATH="${DATA_PATH:-/data3/leics/dataset/teeth/sample512_merged}"
 INDEX_PATH="${INDEX_PATH:-files/zj}"
