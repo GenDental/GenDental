@@ -57,6 +57,7 @@ model:
     max_test_samples: 2000
     save_merged: true
     missing_point_eps: 1.0e-6
+    test_center_noise_scale: 0.02
 
 dataset:
   module: dataset.teeth_dataset.TeethDataManager
@@ -72,3 +73,6 @@ generation:
   batch_size: 16
   save_merged: true
   seed: 3407
+  reference_data_path: /data3/leics/dataset/teeth/sample512_merged
+  reference_index_path: files/zj
+  center_noise_scale: 0.02

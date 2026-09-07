@@ -42,6 +42,7 @@ class oldGPT(pl.LightningModule):
         max_test_samples: int = 2000,
         save_merged: bool = True,
         missing_point_eps: float = 1e-6,
+        test_center_noise_scale: float = 0.02,
     ):
         super().__init__()
         self.transformer = instantiate_from_config(transformer_config)
@@ -58,6 +59,9 @@ class oldGPT(pl.LightningModule):
         self.missing_point_eps = float(missing_point_eps)
         if self.missing_point_eps <= 0:
             raise ValueError("missing_point_eps must be positive.")
+        self.test_center_noise_scale = float(test_center_noise_scale)
+        if self.test_center_noise_scale < 0:
+            raise ValueError("test_center_noise_scale must be non-negative.")
         if self.use_ema:
             self.ema_model = EMA(self.transformer.parameters(), decay=0.9999)
     
@@ -345,6 +349,7 @@ class oldGPT(pl.LightningModule):
         device: torch.device,
         dtype: torch.dtype,
         generator: Optional[torch.Generator] = None,
+        condition_centers: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """
         GPT-style next-token generation.
@@ -380,7 +385,18 @@ class oldGPT(pl.LightningModule):
             )
             * self.missing_point_eps
         )
-        context_centers = context_points.mean(dim=-2)
+        if condition_centers is None:
+            context_centers = context_points.mean(dim=-2)
+            use_fixed_centers = False
+        else:
+            expected_shape = (batch_size, num_teeth, 3)
+            if tuple(condition_centers.shape) != expected_shape:
+                raise ValueError(
+                    f"condition_centers must have shape {expected_shape}, "
+                    f"got {tuple(condition_centers.shape)}."
+                )
+            context_centers = condition_centers.to(device=device, dtype=dtype)
+            use_fixed_centers = True
 
         # Raw model predictions. These are never cleared by the mask.
         generated_points = torch.zeros_like(context_points)
@@ -457,7 +473,8 @@ class oldGPT(pl.LightningModule):
             )
 
             context_points[:, tooth_index] = feedback_points
-            context_centers[:, tooth_index] = feedback_points.mean(dim=-2)
+            if not use_fixed_centers:
+                context_centers[:, tooth_index] = feedback_points.mean(dim=-2)
 
         return {
             "points": generated_points,
@@ -475,6 +492,9 @@ class oldGPT(pl.LightningModule):
         batch_size: int = 1,
         save_merged: Optional[bool] = None,
         seed: int = 3407,
+        reference_data_path: Optional[str] = None,
+        reference_index_path: Optional[str] = None,
+        center_noise_scale: float = 0.02,
     ) -> None:
         """Generate structured samples without constructing a DataLoader."""
         if num_samples <= 0 or batch_size <= 0:
@@ -491,11 +511,47 @@ class oldGPT(pl.LightningModule):
         generator.manual_seed(int(seed))
         num_teeth = self.transformer.num_teeth
         num_points = self.transformer.group_size
+        if not reference_data_path or not reference_index_path:
+            raise ValueError("Test-center generation requires reference paths.")
+        reference_indexes = np.load(
+            os.path.join(reference_index_path, "test.npy")
+        )
+        reference_indexes = reference_indexes[reference_indexes != 145]
+        if len(reference_indexes) == 0:
+            raise ValueError("The test index is empty.")
+        if center_noise_scale < 0:
+            raise ValueError("center_noise_scale must be non-negative.")
 
         saved = 0
         with self.ema_scope():
             while saved < num_samples:
                 current_batch = min(batch_size, num_samples - saved)
+                reference_ids = [
+                    reference_indexes[(saved + i) % len(reference_indexes)]
+                    for i in range(current_batch)
+                ]
+                centers = []
+                for reference_id in reference_ids:
+                    sample_path = os.path.join(
+                        reference_data_path, f"{reference_id}.npz"
+                    )
+                    with np.load(sample_path) as sample:
+                        points = sample["after_pts"]
+                        reference_mask = sample["mask"].astype(bool)
+                    sample_centers = points.mean(axis=-2)
+                    sample_centers[~reference_mask] = 0.0
+                    centers.append(sample_centers)
+                condition_centers = torch.as_tensor(
+                    np.stack(centers),
+                    device=parameter.device,
+                    dtype=parameter.dtype,
+                )
+                condition_centers += torch.rand(
+                    condition_centers.shape,
+                    device=parameter.device,
+                    dtype=parameter.dtype,
+                    generator=generator,
+                ) * float(center_noise_scale)
                 generated = self.autoregressive_generate(
                     batch_size=current_batch,
                     num_teeth=num_teeth,
@@ -503,6 +559,7 @@ class oldGPT(pl.LightningModule):
                     device=parameter.device,
                     dtype=parameter.dtype,
                     generator=generator,
+                    condition_centers=condition_centers,
                 )
 
                 for batch_index in range(current_batch):
@@ -551,14 +608,7 @@ class oldGPT(pl.LightningModule):
         batch,
         batch_idx: int,
     ) -> None:
-        (
-            index,
-            before_pts,
-            after_pts,
-            before_normals,
-            after_normals,
-            masks,
-        ) = batch
+        index, before_pts, after_pts, masks = self._unpack_batch(batch)
 
         if self.num >= self.max_test_samples:
             return
@@ -586,12 +636,23 @@ class oldGPT(pl.LightningModule):
             )
 
         for generation_index in range(self.num_test_generations):
+            condition_centers = after_pts.mean(dim=-2)
+            condition_centers = torch.where(
+                masks.bool()[:, :, None],
+                condition_centers,
+                torch.zeros_like(condition_centers),
+            )
+            condition_centers += (
+                torch.rand_like(condition_centers)
+                * self.test_center_noise_scale
+            )
             generated = self.autoregressive_generate(
                 batch_size=batch_size,
                 num_teeth=num_teeth,
                 num_points=num_points,
                 device=after_pts.device,
                 dtype=after_pts.dtype,
+                condition_centers=condition_centers,
             )
 
             generated_points = generated["points"]
