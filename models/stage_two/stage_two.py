@@ -84,8 +84,22 @@ def smooth_predicted_matrices_batch(predicted_matrices, window=5, poly=2):
     return torch.from_numpy(smoothed).to(device).float()
 
 class MotionTransfer(pl.LightningModule):
-    def __init__(self, transformer_config, optimizer_config=None, scheduler_config=None, use_ema=True):
+    def __init__(
+        self, transformer_config, optimizer_config=None,
+        scheduler_config=None, use_ema=True, task_mode='motion',
+    ):
         super().__init__()
+        if task_mode not in {'target', 'motion'}:
+            raise ValueError(
+                "task_mode must be either 'target' or 'motion', "
+                f"got {task_mode!r}."
+            )
+        self.task_mode = task_mode
+        if 'params' not in transformer_config:
+            transformer_config['params'] = {}
+        transformer_config['params']['num_steps'] = (
+            1 if task_mode == 'target' else 21
+        )
         # self.quantizer = instantiate_non_trainable_model(quantizer_config)
         self.transformer = instantiate_from_config(transformer_config)
         self.use_ema = use_ema
@@ -114,6 +128,38 @@ class MotionTransfer(pl.LightningModule):
 
 
     def forward(self, batch):
+        if self.task_mode == 'target':
+            return self._forward_target(batch)
+        return self._forward_motion(batch)
+
+    def _forward_target(self, batch):
+        index, before_pts, after_pts, before_normals, after_normals, masks = batch
+        before_centroid = before_pts.mean(dim=-2)
+        after_centroid = after_pts.mean(dim=-2)
+        predicted_params = self.transformer(
+            before_pts, before_centroid, after_pts, masks
+        )
+        rotation_6d = predicted_params[:, :, :6]
+        transition = predicted_params[:, :, 6:]
+        rotation_6d = rearrange(rotation_6d, 'b n c -> (b n) c')
+        rot_matrix = rotation_6d_to_matrix(rotation_6d)
+        after_points = rearrange(after_pts, 'b n p c -> (b n) p c')
+        after_centroid = rearrange(after_centroid, 'b n c -> (b n) c')
+        transition = rearrange(transition, 'b n c -> (b n) c')
+        generated_points = torch.bmm(
+            after_points - after_centroid.unsqueeze(1), rot_matrix
+        ) + (transition + after_centroid).unsqueeze(1)
+        generated_points = rearrange(
+            generated_points, '(b n) p c -> b n p c', n=32
+        )
+
+        criterion = nn.MSELoss(reduction='none')
+        rec_loss = (
+            criterion(generated_points, before_pts) * masks[:, :, None, None]
+        ).sum()
+        return rec_loss
+
+    def _forward_motion(self, batch):
         index, before_pts, after_pts, masks, matrices, inv_matrices = batch
         before_centroid = before_pts.mean(dim=-2)
         after_centroid = after_pts.mean(dim=-2)
@@ -181,12 +227,17 @@ class MotionTransfer(pl.LightningModule):
                     print(f"{context}: Restored training weights")
     
     def training_step(self, batch, batch_idx):
-        loss, rec_loss = self.forward(batch)
         split = 'train'
-        loss_dict = {
-            f"{split}_total_loss": rec_loss.detach(),
-            f"{split}_smooth_loss": (loss-rec_loss).detach(),
-        }
+        result = self.forward(batch)
+        if self.task_mode == 'target':
+            loss = result
+            loss_dict = {f"{split}_total_loss": loss.detach()}
+        else:
+            loss, rec_loss = result
+            loss_dict = {
+                f"{split}_total_loss": rec_loss.detach(),
+                f"{split}_smooth_loss": (loss-rec_loss).detach(),
+            }
         self.log_dict(loss_dict, prog_bar=True, logger=True, sync_dist=False, rank_zero_only=True)
         if self.use_ema:
             self.ema_model.update()
@@ -194,11 +245,14 @@ class MotionTransfer(pl.LightningModule):
         return loss
     
     def validation_step(self, batch, batch_idx):
-        loss, rec_loss = self.forward(batch)
         split = 'val'
-        loss_dict = {
-            f"{split}_total_loss": rec_loss.detach(),
-        }
+        result = self.forward(batch)
+        if self.task_mode == 'target':
+            loss = result
+            value = loss
+        else:
+            loss, value = result
+        loss_dict = {f"{split}_total_loss": value.detach()}
         self.log_dict(loss_dict, prog_bar=True, logger=True, sync_dist=False, rank_zero_only=True)
 
         return loss
@@ -207,7 +261,52 @@ class MotionTransfer(pl.LightningModule):
         self.num = 0
     
     def test_step(self, batch, batch_idx):
-        index, before_pts, after_pts, before_normals, after_normals,  masks, matrices, inv_matrices = batch
+        if self.task_mode == 'target':
+            return self._test_target(batch, batch_idx)
+        return self._test_motion(batch, batch_idx)
+
+    def _test_target(self, batch, batch_idx):
+        index, before_pts, after_pts, before_normals, after_normals, masks = batch
+        before_centroid = before_pts.mean(dim=-2)
+        after_centroid = after_pts.mean(dim=-2)
+        predicted_params = self.transformer(
+            before_pts, before_centroid, after_pts, masks
+        )
+        rotation_6d = rearrange(
+            predicted_params[:, :, :6], 'b n c -> (b n) c'
+        )
+        transition = rearrange(
+            predicted_params[:, :, 6:], 'b n c -> (b n) c'
+        )
+        rot_matrix = rotation_6d_to_matrix(rotation_6d)
+        after_points = rearrange(after_pts, 'b n p c -> (b n) p c')
+        after_centroid = rearrange(after_centroid, 'b n c -> (b n) c')
+        generated_points = torch.bmm(
+            after_points - after_centroid.unsqueeze(1), rot_matrix
+        ) + (transition + after_centroid).unsqueeze(1)
+        generated_points = rearrange(
+            generated_points, '(b n) p c -> b (n p) c', n=32
+        )
+        before_pts = rearrange(before_pts, 'b n p c -> b (n p) c')
+        after_pts = rearrange(after_pts, 'b n p c -> b (n p) c')
+        output_dir = '/data3/leics/dataset/teeth/test_style_transfer'
+        os.makedirs(output_dir, exist_ok=True)
+        for i in range(before_pts.shape[0]):
+            write_pointcloud(
+                generated_points[i].cpu().numpy(),
+                f'{output_dir}/{batch_idx}_{i}_pred.ply',
+            )
+            write_pointcloud(
+                before_pts[i].cpu().numpy(),
+                f'{output_dir}/{batch_idx}_{i}_style.ply',
+            )
+            write_pointcloud(
+                after_pts[i].cpu().numpy(),
+                f'{output_dir}/{batch_idx}_{i}_after.ply',
+            )
+
+    def _test_motion(self, batch, batch_idx):
+        index, before_pts, after_pts, masks, matrices, inv_matrices = batch
         before_centroid = before_pts.mean(dim=-2)
         after_centroid = after_pts.mean(dim=-2)
         predicted_params = self.transformer(before_pts, before_centroid, after_pts, masks)

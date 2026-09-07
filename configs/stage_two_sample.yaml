@@ -1,6 +1,7 @@
 model:
   module: models.stage_two.stage_two_sampler.MotionTransferSampler
   params:
+    task_mode: motion
     transformer_config:
       module: models.stage_two.style_transformer.StyleTransformer
       params:

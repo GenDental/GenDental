@@ -132,6 +132,7 @@ class StyleTransformer(nn.Module):
         z_dim,
         input_dim,
         num_heads,
+        num_steps=21,
         ):
         super(StyleTransformer, self).__init__()
         self.encoders = nn.ModuleList([StyleEncoder(z_dim, input_dim) for _ in range(32)])
@@ -145,7 +146,7 @@ class StyleTransformer(nn.Module):
             nn.LeakyReLU(),
             nn.Linear(z_dim, z_dim),
             nn.LeakyReLU(),
-            nn.Linear(z_dim, 9*21),
+            nn.Linear(z_dim, 9 * num_steps),
         )
         self.apply(self._init_weights)
 

@@ -1,6 +1,7 @@
 model:
   module: models.stage_two.stage_two.MotionTransfer
   params:
+    task_mode: motion
     transformer_config:
       module: models.stage_two.style_transformer.StyleTransformer
       params:
@@ -28,11 +29,12 @@ model:
     
   
 dataset:
-  module: dataset.style_transfer.MotionDataManager
+  module: dataset.style_transfer.StageTwoDataManager
   params:
     data_path: /data3/leics/dataset/teeth/sample512_merged
     index_path: "files/motion"
     batch_size: 8
+    task_mode: ${model.params.task_mode}
 
 
 

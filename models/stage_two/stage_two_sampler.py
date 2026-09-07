@@ -32,8 +32,22 @@ def remove_prefix_from_state_dict(state_dict, prefix="GPT_Transformer."):
     return new_state_dict
 
 class MotionTransferSampler(pl.LightningModule):
-    def __init__(self, transformer_config, optimizer_config=None, scheduler_config=None, use_ema=True):
+    def __init__(
+        self, transformer_config, optimizer_config=None,
+        scheduler_config=None, use_ema=True, task_mode='motion',
+    ):
         super().__init__()
+        if task_mode not in {'target', 'motion'}:
+            raise ValueError(
+                "task_mode must be either 'target' or 'motion', "
+                f"got {task_mode!r}."
+            )
+        self.task_mode = task_mode
+        if 'params' not in transformer_config:
+            transformer_config['params'] = {}
+        transformer_config['params']['num_steps'] = (
+            1 if task_mode == 'target' else 21
+        )
         # self.quantizer = instantiate_non_trainable_model(quantizer_config)
         self.transformer = instantiate_from_config(transformer_config)
         self.use_ema = use_ema
@@ -296,6 +310,66 @@ class MotionTransferSampler(pl.LightningModule):
         after_points: torch.Tensor,
         masks: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if self.task_mode == 'target':
+            return self._generate_target_batch(
+                style_points, after_points, masks
+            )
+        return self._generate_motion_batch(
+            style_points, after_points, masks
+        )
+
+    def _generate_target_batch(
+        self,
+        style_points: torch.Tensor,
+        after_points: torch.Tensor,
+        masks: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        style_centers = style_points.mean(dim=-2)
+        after_centers = after_points.mean(dim=-2)
+        predicted = self.transformer(
+            style_points, style_centers, after_points, masks
+        )
+        rotations = rotation_6d_to_matrix(
+            rearrange(predicted[:, :, :6], 'b n c -> (b n) c')
+        )
+        translations = rearrange(
+            predicted[:, :, 6:], 'b n c -> (b n) c'
+        )
+        grouped_after = rearrange(
+            after_points, 'b n p c -> (b n) p c'
+        )
+        grouped_centers = rearrange(
+            after_centers, 'b n c -> (b n) c'
+        )
+        generated = torch.bmm(
+            grouped_after - grouped_centers.unsqueeze(1), rotations
+        ) + (translations + grouped_centers).unsqueeze(1)
+        generated = rearrange(
+            generated, '(b n) p c -> b n p c', n=32
+        )
+
+        batch_size, num_teeth = style_points.shape[:2]
+        matrices = torch.zeros(
+            batch_size, 1, num_teeth, 4, 4,
+            device=style_points.device, dtype=style_points.dtype,
+        )
+        matrices[:, 0, :, :3, :3] = rearrange(
+            rotations, '(b n) c1 c2 -> b n c1 c2',
+            b=batch_size, n=num_teeth,
+        )
+        matrices[:, 0, :, :3, 3] = rearrange(
+            translations, '(b n) c -> b n c',
+            b=batch_size, n=num_teeth,
+        )
+        matrices[:, 0, :, 3, 3] = 1
+        return generated, matrices
+
+    def _generate_motion_batch(
+        self,
+        style_points: torch.Tensor,
+        after_points: torch.Tensor,
+        masks: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         style_centers = style_points.mean(dim=-2)
         predicted = self.transformer(
             style_points,
@@ -406,6 +480,15 @@ class MotionTransferSampler(pl.LightningModule):
                 )
 
                 for index, (stem, style_file, _) in enumerate(current_pairs):
+                    if self.task_mode == 'target':
+                        np.savez(
+                            output_path / f'{stem}.npz',
+                            before_pts=generated[index].float().cpu().numpy(),
+                            after_pts=after_tensor[index].float().cpu().numpy(),
+                            mask=mask_tensor[index].cpu().numpy(),
+                        )
+                        continue
+
                     out_matrices = predicted_matrices[index].cpu().numpy()
                     relative_matrices = np.tile(
                         np.eye(4, dtype=out_matrices.dtype),
