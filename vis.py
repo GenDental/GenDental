@@ -21,7 +21,7 @@ def get_args() -> argparse.Namespace:
     parser.add_argument(
         "--input-dir",
         type=Path,
-        default=Path("/data3/leics/dataset/teeth/merged_alignment_5x"),
+        default=Path("/data3/leics/dataset/GenDental/stage_two_samples"),
         help="Directory containing Stage II NPZ files.",
     )
     parser.add_argument(
