@@ -9,7 +9,7 @@ from einops import rearrange, repeat
 from pytorch3d.loss import chamfer_distance
 from pytorch3d.transforms import Transform3d, rotation_6d_to_matrix
 from vector_quantize_pytorch import FSQ, LFQ
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import math
 from utils import instantiate_from_config
 from torch_ema import ExponentialMovingAverage as EMA
@@ -65,7 +65,7 @@ class MotionTransferSampler(pl.LightningModule):
         "optimizer": optimizer,
         "lr_scheduler": {
             "scheduler": scheduler,
-            "interval": "step",
+            "interval": "epoch",
             "frequency": 1,
         }
     }
@@ -111,8 +111,11 @@ class MotionTransferSampler(pl.LightningModule):
         criterion = nn.MSELoss(reduction='none')
 
         
-        rec_loss = criterion(predicted_points, gt_points)
-        rec_loss = (rec_loss * masks.reshape(-1,1,1)).sum(dim=(-1,-2)).mean()
+        squared_error = criterion(predicted_points, gt_points)
+        valid_teeth = masks.sum().clamp_min(1.0)
+        rec_loss = (
+            squared_error * masks.reshape(-1, 1, 1)
+        ).sum() / valid_teeth
         loss = 100 * rec_loss 
 
         return loss
@@ -173,7 +176,8 @@ class MotionTransferSampler(pl.LightningModule):
         num_teeth: int,
         num_points: int,
         rng: np.random.Generator,
-    ) -> Tuple[np.ndarray, np.ndarray]:
+    ) -> np.ndarray:
+        """Load style geometry without using its mask as supervision."""
         with np.load(path) as sample:
             if 'before_pts' in sample:
                 style_points = sample['before_pts']
@@ -183,9 +187,6 @@ class MotionTransferSampler(pl.LightningModule):
                 raise KeyError(
                     f'{path} must contain before_pts or style_pts.'
                 )
-            if 'mask' not in sample:
-                raise KeyError(f'{path} must contain mask.')
-            masks = sample['mask']
 
         expected_shape = (num_teeth, num_points, 3)
         if style_points.shape != expected_shape:
@@ -193,20 +194,22 @@ class MotionTransferSampler(pl.LightningModule):
                 f'{path}: expected style shape {expected_shape}, '
                 f'got {style_points.shape}.'
             )
-        if masks.shape != (num_teeth,):
-            raise ValueError(
-                f'{path}: expected mask shape {(num_teeth,)}, '
-                f'got {masks.shape}.'
-            )
-
         style_points = style_points.astype(np.float32, copy=True)
-        masks = masks.astype(bool, copy=False)
-        missing_count = int((~masks).sum())
-        if missing_count:
-            style_points[~masks] = (
-                rng.random((missing_count, num_points, 3)) * 1e-6
+        if not np.isfinite(style_points).all():
+            raise ValueError(f'{path}: style points contain NaN or Inf.')
+
+        # The style mask must not decide which teeth are generated. However,
+        # zero-padded style teeth are unsafe inputs for the point encoder.
+        # Replace only degenerate geometry with tiny noise, without reading or
+        # applying the style mask.
+        tooth_extent = np.ptp(style_points, axis=1).max(axis=1)
+        degenerate = tooth_extent < 1e-8
+        degenerate_count = int(degenerate.sum())
+        if degenerate_count:
+            style_points[degenerate] = (
+                rng.random((degenerate_count, num_points, 3)) * 1e-6
             )
-        return style_points, masks
+        return style_points
 
     @staticmethod
     def _load_after(
@@ -214,60 +217,51 @@ class MotionTransferSampler(pl.LightningModule):
         num_teeth: int,
         num_points: int,
         rng: np.random.Generator,
-    ) -> np.ndarray:
-        if path.suffix.lower() == '.npz':
-            with np.load(path) as sample:
-                if 'after_pts' in sample:
-                    points = sample['after_pts']
-                elif 'points' in sample:
-                    points = sample['points']
-                else:
-                    raise KeyError(
-                        f'{path} must contain after_pts or points.'
-                    )
-        else:
-            points = read_pointcloud(str(path))
-
-        points = np.asarray(points)
-        expected_shape = (num_teeth, num_points, 3)
-        if points.shape == expected_shape:
-            return points.astype(np.float32, copy=False)
-        if points.ndim != 2 or points.shape[1] != 3:
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Load Stage-I geometry and its authoritative tooth mask."""
+        if path.suffix.lower() != '.npz':
             raise ValueError(
-                f'{path}: expected merged [K,3] or {expected_shape}, '
+                f'{path}: Stage-II sampling requires a Stage-I NPZ so '
+                'the generated mask is available; PLY input is ambiguous.'
+            )
+
+        with np.load(path) as sample:
+            if 'after_pts' in sample:
+                points = sample['after_pts']
+            elif 'points' in sample:
+                points = sample['points']
+            else:
+                raise KeyError(
+                    f'{path} must contain after_pts or points.'
+                )
+            if 'mask' not in sample:
+                raise KeyError(
+                    f'{path} must contain the Stage-I generated mask.'
+                )
+            masks = sample['mask']
+
+        expected_shape = (num_teeth, num_points, 3)
+        if points.shape != expected_shape:
+            raise ValueError(
+                f'{path}: expected point shape {expected_shape}, '
                 f'got {points.shape}.'
             )
-        if len(points) % num_points:
+        if masks.shape != (num_teeth,):
             raise ValueError(
-                f'{path}: {len(points)} points cannot be split into '
-                f'{num_points}-point teeth.'
+                f'{path}: expected mask shape {(num_teeth,)}, '
+                f'got {masks.shape}.'
             )
 
-        present_teeth = len(points) // num_points
-        if present_teeth > num_teeth:
-            raise ValueError(
-                f'{path}: contains {present_teeth} tooth blocks; '
-                f'maximum is {num_teeth}.'
+        points = points.astype(np.float32, copy=True)
+        if not np.isfinite(points).all():
+            raise ValueError(f'{path}: Stage-I points contain NaN or Inf.')
+        masks = masks.astype(bool, copy=False)
+        missing_count = int((~masks).sum())
+        if missing_count:
+            points[~masks] = (
+                rng.random((missing_count, num_points, 3)) * 1e-6
             )
-
-        if present_teeth < num_teeth:
-            logger.warning(
-                f'{path} is a merged PLY with {present_teeth} tooth blocks '
-                'but no tooth-position mask. It is usable for a quick test, '
-                'but anatomical slots are only approximate. Regenerate '
-                'Stage I samples to create the preferred same-name NPZ.'
-            )
-
-        # After geometry is consumed by a global point encoder, so padding
-        # slots do not encode anatomical positions. Preserve all PLY points
-        # in file order and fill unused slots with the training convention.
-        after_points = (
-            rng.random((num_teeth, num_points, 3)).astype(np.float32) * 1e-6
-        )
-        after_points[:present_teeth] = points.reshape(
-            present_teeth, num_points, 3
-        )
-        return after_points
+        return points, masks
 
     @classmethod
     def _paired_inputs(
@@ -445,20 +439,20 @@ class MotionTransferSampler(pl.LightningModule):
         pairs = self._paired_inputs(style_path, data_path, rng)
         parameter = next(self.parameters())
 
-        with self.ema_scope():
+        with nullcontext():  # Use the same raw weights as validation.
             for start in range(0, len(pairs), batch_size):
                 current_pairs = pairs[start:start + batch_size]
                 styles, afters, masks = [], [], []
                 for _, style_file, data_file in current_pairs:
-                    style, mask = self._load_style(
+                    style = self._load_style(
                         style_file, num_teeth, num_points, rng
                     )
-                    after = self._load_after(
+                    after, stage_one_mask = self._load_after(
                         data_file, num_teeth, num_points, rng
                     )
                     styles.append(style)
                     afters.append(after)
-                    masks.append(mask)
+                    masks.append(stage_one_mask)
 
                 style_tensor = torch.as_tensor(
                     np.stack(styles),
@@ -478,6 +472,13 @@ class MotionTransferSampler(pl.LightningModule):
                 generated, predicted_matrices = self._generate_batch(
                     style_tensor, after_tensor, mask_tensor
                 )
+                if not torch.isfinite(generated).all():
+                    stems = [pair[0] for pair in current_pairs]
+                    raise FloatingPointError(
+                        'Stage-II generated NaN or Inf for samples '
+                        f'{stems}. Refusing to write invalid NPZ files.'
+                    )
+
 
                 for index, (stem, style_file, _) in enumerate(current_pairs):
                     if self.task_mode == 'target':

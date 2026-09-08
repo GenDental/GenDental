@@ -3,6 +3,7 @@ import numpy as np
 from loguru import logger
 import importlib
 import torch.nn as nn  
+import torch.nn.functional as F
 import pytorch_lightning as pl
 from timm.models.layers import DropPath, trunc_normal_
 from einops import rearrange, repeat
@@ -46,7 +47,8 @@ def smoothness_loss(predicted_matrices, masks, alpha=1.0, beta=1.0):
 
     loss = alpha * loss_trans + beta * loss_rot
 
-    loss = (loss * masks).mean()
+    valid_teeth = masks.sum().clamp_min(1.0)
+    loss = (loss * masks).sum() / valid_teeth
     return loss
 
 from scipy.signal import savgol_filter
@@ -117,7 +119,7 @@ class MotionTransfer(pl.LightningModule):
         "optimizer": optimizer,
         "lr_scheduler": {
             "scheduler": scheduler,
-            "interval": "step",
+            "interval": "epoch",
             "frequency": 1,
         }
     }
@@ -153,10 +155,13 @@ class MotionTransfer(pl.LightningModule):
             generated_points, '(b n) p c -> b n p c', n=32
         )
 
-        criterion = nn.MSELoss(reduction='none')
+        squared_error = F.mse_loss(
+            generated_points, before_pts, reduction='none'
+        )
+        valid_teeth = masks.sum().clamp_min(1.0)
         rec_loss = (
-            criterion(generated_points, before_pts) * masks[:, :, None, None]
-        ).sum()
+            squared_error * masks[:, :, None, None]
+        ).sum() / valid_teeth
         return rec_loss
 
     def _forward_motion(self, batch):
@@ -195,11 +200,13 @@ class MotionTransfer(pl.LightningModule):
         predicted_matrices = rearrange(predicted_matrices,'(b l p) c1 c2 -> b l p c1 c2', b=b, l=l, p=p)
         loss_smooth = smoothness_loss(predicted_matrices, masks, alpha=1.0, beta=1.0)
 
-        criterion = nn.MSELoss(reduction='none')
-
-        
-        rec_loss = criterion(predicted_points, gt_points)
-        rec_loss = (rec_loss * repeated_masks.reshape(-1,1,1)).sum(dim=(-1,-2)).mean()
+        squared_error = F.mse_loss(
+            predicted_points, gt_points, reduction='none'
+        )
+        valid_teeth = repeated_masks.sum().clamp_min(1.0)
+        rec_loss = (
+            squared_error * repeated_masks.reshape(-1, 1, 1)
+        ).sum() / valid_teeth
         loss = 100 * rec_loss + 600 * loss_smooth
 
         return loss, 100*rec_loss
@@ -235,8 +242,9 @@ class MotionTransfer(pl.LightningModule):
         else:
             loss, rec_loss = result
             loss_dict = {
-                f"{split}_total_loss": rec_loss.detach(),
-                f"{split}_smooth_loss": (loss-rec_loss).detach(),
+                f"{split}_total_loss": loss.detach(),
+                f"{split}_rec_loss": rec_loss.detach(),
+                f"{split}_smooth_loss": (loss - rec_loss).detach(),
             }
         self.log_dict(loss_dict, prog_bar=True, logger=True, sync_dist=False, rank_zero_only=True)
         if self.use_ema:
@@ -249,10 +257,14 @@ class MotionTransfer(pl.LightningModule):
         result = self.forward(batch)
         if self.task_mode == 'target':
             loss = result
-            value = loss
+            loss_dict = {f"{split}_total_loss": loss.detach()}
         else:
-            loss, value = result
-        loss_dict = {f"{split}_total_loss": value.detach()}
+            loss, rec_loss = result
+            loss_dict = {
+                f"{split}_total_loss": loss.detach(),
+                f"{split}_rec_loss": rec_loss.detach(),
+                f"{split}_smooth_loss": (loss - rec_loss).detach(),
+            }
         self.log_dict(loss_dict, prog_bar=True, logger=True, sync_dist=False, rank_zero_only=True)
 
         return loss

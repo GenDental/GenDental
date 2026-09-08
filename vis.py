@@ -21,14 +21,26 @@ def get_args() -> argparse.Namespace:
     parser.add_argument(
         "--input-dir",
         type=Path,
-        default=Path("stage_two_samples"),
+        default=Path("/data3/leics/dataset/GenDental/stage_two_samples"),
         help="Directory containing Stage II NPZ files.",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path.cwd(),
-        help="PNG output directory. Defaults to the current directory.",
+        default=Path("stage_two_visualizations"),
+        help="Directory for rendered PNG files.",
+    )
+    parser.add_argument(
+        "--num-samples",
+        type=int,
+        default=12,
+        help="Number of samples to render. Use 0 to render all.",
+    )
+    parser.add_argument(
+        "--sample-ids",
+        nargs="*",
+        default=None,
+        help="Optional NPZ stems to render, for example: 0 10 25.",
     )
     parser.add_argument(
         "--max-points-per-tooth",
@@ -174,7 +186,17 @@ def render_sample(
         elevation,
         azimuth,
     )
-    figure.suptitle(input_path.stem)
+    before_centers = before_points.mean(axis=1)
+    after_centers = after_points.mean(axis=1)
+    center_motion = np.linalg.norm(
+        after_centers[masks] - before_centers[masks],
+        axis=-1,
+    )
+    figure.suptitle(
+        f"Sample {input_path.stem} | valid teeth: {int(masks.sum())} | "
+        f"center motion mean/max: "
+        f"{center_motion.mean():.4f}/{center_motion.max():.4f}"
+    )
     figure.savefig(output_path, dpi=dpi, bbox_inches="tight")
     plt.close(figure)
 
@@ -185,6 +207,8 @@ def main() -> None:
         raise ValueError("--max-points-per-tooth must be positive.")
     if args.dpi <= 0:
         raise ValueError("--dpi must be positive.")
+    if args.num_samples < 0:
+        raise ValueError("--num-samples must be non-negative.")
 
     input_dir = args.input_dir.expanduser().resolve()
     output_dir = args.output_dir.expanduser().resolve()
@@ -194,7 +218,22 @@ def main() -> None:
     sample_paths = sorted(input_dir.glob("*.npz"), key=natural_key)
     if not sample_paths:
         raise FileNotFoundError(f"No NPZ samples found in: {input_dir}")
+
+    if args.sample_ids:
+        requested = {str(sample_id) for sample_id in args.sample_ids}
+        sample_paths = [
+            path for path in sample_paths if path.stem in requested
+        ]
+        missing = sorted(requested - {path.stem for path in sample_paths})
+        if missing:
+            raise FileNotFoundError(
+                f"Requested sample IDs not found: {missing}"
+            )
+    elif args.num_samples:
+        sample_paths = sample_paths[: args.num_samples]
+
     output_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Rendering {len(sample_paths)} samples to {output_dir}")
 
     for sample_path in sample_paths:
         output_path = output_dir / f"{sample_path.stem}_before_after.png"

@@ -19,7 +19,7 @@ model:
       module: pl_bolts.optimizers.lr_scheduler.LinearWarmupCosineAnnealingLR
       params:
         warmup_epochs: 5
-        warmup_start_lr: 0.0
+        warmup_start_lr: 1e-7
         eta_min: 1e-7
     
     

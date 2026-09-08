@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 source "$(dirname -- "${BASH_SOURCE[0]}")/_common.sh"
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-3}"
-TASK_MODE="${TASK_MODE:-motion}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1,6}"
+TASK_MODE="${TASK_MODE:-target}"
 case "$TASK_MODE" in
   target|motion) ;;
   *) echo "TASK_MODE must be target or motion" >&2; exit 2 ;;
 esac
 if [[ "$TASK_MODE" == "target" ]]; then
-  DEFAULT_OUTPUT_DIR="/data3/leics/dataset/checkpoints/ToothWise/style_transfer"
+  DEFAULT_OUTPUT_DIR="/data3/leics/dataset/checkpoints/Gendental/stage_two"
   DEFAULT_CKPT_PATH=""
   DEFAULT_INDEX_PATH="files/zj"
 else
@@ -26,7 +26,7 @@ if [[ -n "$CKPT_PATH" ]]; then
 fi
 run_gendental train configs/stage_two.yaml \
   --output_dir "$OUTPUT_DIR" \
-  --epochs 2000 --base_lr 1e-5 --fast \
+  --epochs 500 --base_lr 1e-4 --monitor val_total_loss --fast \
   --set "model.params.task_mode=$TASK_MODE" \
   --set "dataset.params.data_path=$DATA_PATH" \
   --set "dataset.params.index_path=$INDEX_PATH" \

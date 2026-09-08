@@ -33,11 +33,19 @@ class TeethDataset(data.Dataset):
             
         before_pts = sample['before_pts'].copy()
         after_pts = sample['after_pts'].copy()
-        mask = sample['mask']
+        mask = sample['mask'].astype(bool, copy=False)
         eps = 1e-6
         for i in range(32):
             if not mask[i]:
                 before_pts[i] = after_pts[i] = np.random.random(after_pts[i].shape) * eps
+        if not np.isfinite(before_pts[mask]).all():
+            raise ValueError(
+                f'{index}.npz contains NaN or Inf in an unmasked before tooth'
+            )
+        if not np.isfinite(after_pts[mask]).all():
+            raise ValueError(
+                f'{index}.npz contains NaN or Inf in an unmasked after tooth'
+            )
         before_pts = torch.tensor(before_pts,dtype=torch.float32)
         after_pts = torch.tensor(after_pts,dtype=torch.float32)
         mask = torch.tensor(mask,dtype=torch.float32)
@@ -81,7 +89,7 @@ class TeethDataManager(pl.LightningDataModule):
         self.with_normals = with_normals
 
     def train_dataloader(self):
-        file = os.path.join(self.index_path,'train.npy')
+        file = os.path.join(self.index_path,'train1.npy')
         train_dataset = TeethDataset(self.data_path,file,self.with_normals)
         return DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True, drop_last=True)
 

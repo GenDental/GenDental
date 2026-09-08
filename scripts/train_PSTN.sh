@@ -2,11 +2,11 @@
 set -euo pipefail
 source "$(dirname -- "${BASH_SOURCE[0]}")/_common.sh"
 
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-6,7}"
-OUTPUT_DIR="${OUTPUT_DIR:-/data3/leics/dataset/checkpoints/GenDental/PSTN}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,5}"
+OUTPUT_DIR="${OUTPUT_DIR:-/data3/leics/dataset/checkpoints/Gendental/PSTN_tmp}"
 CKPT_PATH="${CKPT_PATH:-/data3/leics/dataset/checkpoints/ToothWise/PSTN_zj/ckpt/last-v1.ckpt}"
-DATA_PATH="${DATA_PATH:-/data3/leics/dataset/teeth/sample512_merged}"
-INDEX_PATH="${INDEX_PATH:-files/zj}"
+DATA_PATH="${DATA_PATH:-/data3/leics/dataset/GenDental/merged_alignment}"
+INDEX_PATH="${INDEX_PATH:-files/alignment5x}"
 EPOCHS="${EPOCHS:-500}"
 BASE_LR="${BASE_LR:-1e-4}"
 BATCH_SIZE="${BATCH_SIZE:-16}"

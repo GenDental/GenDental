@@ -43,6 +43,7 @@ class oldGPT(pl.LightningModule):
         save_merged: bool = True,
         missing_point_eps: float = 1e-6,
         test_center_noise_scale: float = 0.02,
+        test_center_mode: str = "reference",
     ):
         super().__init__()
         self.transformer = instantiate_from_config(transformer_config)
@@ -62,9 +63,21 @@ class oldGPT(pl.LightningModule):
         self.test_center_noise_scale = float(test_center_noise_scale)
         if self.test_center_noise_scale < 0:
             raise ValueError("test_center_noise_scale must be non-negative.")
+        self.test_center_mode = self._validate_center_mode(test_center_mode)
         if self.use_ema:
             self.ema_model = EMA(self.transformer.parameters(), decay=0.9999)
     
+    @staticmethod
+    def _validate_center_mode(center_mode: str) -> str:
+        center_mode = str(center_mode).strip().lower()
+        valid_modes = {"reference", "autoregressive"}
+        if center_mode not in valid_modes:
+            raise ValueError(
+                f"center_mode must be one of {sorted(valid_modes)}, "
+                f"got {center_mode!r}."
+            )
+        return center_mode
+
     def configure_optimizers(self):
         trainable_params = filter(lambda p: p.requires_grad, self.parameters())
         optimizer = instantiate_from_config(self.optimizer_config, params=trainable_params, lr=self.learning_rate)
@@ -495,6 +508,7 @@ class oldGPT(pl.LightningModule):
         reference_data_path: Optional[str] = None,
         reference_index_path: Optional[str] = None,
         center_noise_scale: float = 0.02,
+        center_mode: str = "reference",
     ) -> None:
         """Generate structured samples without constructing a DataLoader."""
         if num_samples <= 0 or batch_size <= 0:
@@ -511,47 +525,57 @@ class oldGPT(pl.LightningModule):
         generator.manual_seed(int(seed))
         num_teeth = self.transformer.num_teeth
         num_points = self.transformer.group_size
-        if not reference_data_path or not reference_index_path:
-            raise ValueError("Test-center generation requires reference paths.")
-        reference_indexes = np.load(
-            os.path.join(reference_index_path, "test.npy")
-        )
-        reference_indexes = reference_indexes[reference_indexes != 145]
-        if len(reference_indexes) == 0:
-            raise ValueError("The test index is empty.")
-        if center_noise_scale < 0:
-            raise ValueError("center_noise_scale must be non-negative.")
+        center_mode = self._validate_center_mode(center_mode)
+        reference_indexes = None
+        if center_mode == "reference":
+            if not reference_data_path or not reference_index_path:
+                raise ValueError(
+                    "reference center mode requires reference_data_path "
+                    "and reference_index_path."
+                )
+            reference_indexes = np.load(
+                os.path.join(reference_index_path, "test.npy")
+            )
+            reference_indexes = reference_indexes[reference_indexes != 145]
+            if len(reference_indexes) == 0:
+                raise ValueError("The test index is empty.")
+            if center_noise_scale < 0:
+                raise ValueError("center_noise_scale must be non-negative.")
 
         saved = 0
         with self.ema_scope():
             while saved < num_samples:
                 current_batch = min(batch_size, num_samples - saved)
-                reference_ids = [
-                    reference_indexes[(saved + i) % len(reference_indexes)]
-                    for i in range(current_batch)
-                ]
-                centers = []
-                for reference_id in reference_ids:
-                    sample_path = os.path.join(
-                        reference_data_path, f"{reference_id}.npz"
+                condition_centers = None
+                if center_mode == "reference":
+                    reference_ids = [
+                        reference_indexes[
+                            (saved + i) % len(reference_indexes)
+                        ]
+                        for i in range(current_batch)
+                    ]
+                    centers = []
+                    for reference_id in reference_ids:
+                        sample_path = os.path.join(
+                            reference_data_path, f"{reference_id}.npz"
+                        )
+                        with np.load(sample_path) as sample:
+                            points = sample["after_pts"]
+                            reference_mask = sample["mask"].astype(bool)
+                        sample_centers = points.mean(axis=-2)
+                        sample_centers[~reference_mask] = 0.0
+                        centers.append(sample_centers)
+                    condition_centers = torch.as_tensor(
+                        np.stack(centers),
+                        device=parameter.device,
+                        dtype=parameter.dtype,
                     )
-                    with np.load(sample_path) as sample:
-                        points = sample["after_pts"]
-                        reference_mask = sample["mask"].astype(bool)
-                    sample_centers = points.mean(axis=-2)
-                    sample_centers[~reference_mask] = 0.0
-                    centers.append(sample_centers)
-                condition_centers = torch.as_tensor(
-                    np.stack(centers),
-                    device=parameter.device,
-                    dtype=parameter.dtype,
-                )
-                condition_centers += torch.rand(
-                    condition_centers.shape,
-                    device=parameter.device,
-                    dtype=parameter.dtype,
-                    generator=generator,
-                ) * float(center_noise_scale)
+                    condition_centers += torch.rand(
+                        condition_centers.shape,
+                        device=parameter.device,
+                        dtype=parameter.dtype,
+                        generator=generator,
+                    ) * float(center_noise_scale)
                 generated = self.autoregressive_generate(
                     batch_size=current_batch,
                     num_teeth=num_teeth,
@@ -636,16 +660,18 @@ class oldGPT(pl.LightningModule):
             )
 
         for generation_index in range(self.num_test_generations):
-            condition_centers = after_pts.mean(dim=-2)
-            condition_centers = torch.where(
-                masks.bool()[:, :, None],
-                condition_centers,
-                torch.zeros_like(condition_centers),
-            )
-            condition_centers += (
-                torch.rand_like(condition_centers)
-                * self.test_center_noise_scale
-            )
+            condition_centers = None
+            if self.test_center_mode == "reference":
+                condition_centers = after_pts.mean(dim=-2)
+                condition_centers = torch.where(
+                    masks.bool()[:, :, None],
+                    condition_centers,
+                    torch.zeros_like(condition_centers),
+                )
+                condition_centers += (
+                    torch.rand_like(condition_centers)
+                    * self.test_center_noise_scale
+                )
             generated = self.autoregressive_generate(
                 batch_size=batch_size,
                 num_teeth=num_teeth,

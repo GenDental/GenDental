@@ -15,15 +15,14 @@ model:
     optimizer_config:
       module: torch.optim.AdamW
       weight_decay: 0.05
-      betas: (0.9, 0.95)
+      betas: [0.9, 0.95]
       eps: 1e-8
-      grad_clip: 1.0
 
     scheduler_config:
       module: pl_bolts.optimizers.lr_scheduler.LinearWarmupCosineAnnealingLR
       params:
         warmup_epochs: 5
-        warmup_start_lr: 0.0
+        warmup_start_lr: 1e-7
         eta_min: 1e-7
     
     

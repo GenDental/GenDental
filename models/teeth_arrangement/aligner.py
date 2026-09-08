@@ -141,7 +141,7 @@ class Aligner(pl.LightningModule):
         "optimizer": optimizer,
         "lr_scheduler": {
             "scheduler": scheduler,
-            "interval": "step",
+            "interval": "epoch",
             "frequency": 1,
         }
     }
@@ -157,13 +157,22 @@ class Aligner(pl.LightningModule):
         outputs1 = self.aligner(centroid, before_points).to(torch.float32).cuda()
         predicted_centroid1 = outputs1[:,:,:3]
         dofs1 = rearrange(outputs1[:,:,3:],'b n c -> (b n) c')
-        criterion = nn.MSELoss(reduction='none')
         rot_matrix1 = rotation_6d_to_matrix(dofs1)
         predicted_points = rearrange(before_points - centroid.unsqueeze(2),'b n p c -> (b n) p c')
         predicted_points = torch.bmm(predicted_points,rot_matrix1)
         predicted_points = predicted_points + rearrange(predicted_centroid1,'b n c->(b n) c').unsqueeze(1)
-        loss = 0.1*(criterion(predicted_points,after_points).sum(dim=(1,2)) * masks.flatten()).sum()
-        ADD = criterion(predicted_points,after_points).sum(dim=-1).sqrt().mean(dim=-1)
+
+        masks_flat = masks.reshape(-1)
+        squared_error = F.mse_loss(
+            predicted_points, after_points, reduction='none'
+        )
+        valid_teeth = masks_flat.sum().clamp_min(1.0)
+        loss = 0.1 * (
+            squared_error * masks_flat[:, None, None]
+        ).sum() / valid_teeth
+
+        pointwise_squared_error = squared_error.sum(dim=-1)
+        ADD = pointwise_squared_error.sqrt().mean(dim=-1)
         ADD = 30* (ADD * masks.flatten()).sum() / masks.sum()
 
         return loss, ADD

@@ -19,7 +19,7 @@ if [[ -z "$CKPT_PATH" ]]; then
 fi
 STYLE_DIR="${STYLE_DIR:-/data3/leics/dataset/teeth/sample512_zj}"
 DATA_DIR="${DATA_DIR:-/data3/leics/dataset/GenDental/old_gpt_stochastic_samples}"
-OUTPUT_DIR="${OUTPUT_DIR:-/data3/leics/dataset/GenDental/stage_two_samples}"
+OUTPUT_DIR="${OUTPUT_DIR:-/data3/leics/dataset/GenDental/merged_alignmentg_5x_2}"
 BATCH_SIZE="${BATCH_SIZE:-64}"
 SEED="${SEED:-3407}"
 
