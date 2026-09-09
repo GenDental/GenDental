@@ -6,10 +6,10 @@ from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
 import copy
 import numpy as np
-from models.teeth_alignment.GGNN import GGNN
+from models.teeth_arrangement.GGNN import GGNN
 import math
 from functools import partial
-from models.teeth_alignment.pointnet import PointNet
+from models.teeth_arrangement.pointnet import PointNet
 import torch
 
 class TANet(nn.Module):

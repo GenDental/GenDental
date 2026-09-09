@@ -207,7 +207,7 @@ class Aligner(pl.LightningModule):
         self.all_PA_ADD = []
     
     def test_step(self, batch, batch_idx):
-        index,before_points,after_points,before_normals,after_normals,masks = batch
+        index,before_points,after_points,masks = batch
         bs = before_points.shape[0]
         after_centroid = torch.mean(after_points,dim=-2,keepdim=False)
         after_points = rearrange(after_points,'b n p c -> (b n) p c')
@@ -278,10 +278,6 @@ class Aligner(pl.LightningModule):
         cos_sim = torch.tensor(self.all_CSA)
         average_cos_sim = cos_sim.mean()
         print("Average Cosine Similarity:", average_cos_sim.item())
-
-        pa_add = torch.tensor(self.all_PA_ADD)
-        average_pa_add = pa_add.mean()
-        print("Average PAADD:", average_pa_add.item())
         
 
 

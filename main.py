@@ -118,6 +118,13 @@ def get_args():
     parser.add_argument("--monitor", default="val_total_loss")
     parser.add_argument("--output_dir", default="outputs")
     parser.add_argument("--ckpt_path", default="")
+    parser.add_argument(
+        "--init_ckpt", default="",
+        help=(
+            "Initialize model weights from a checkpoint without restoring "
+            "optimizer, scheduler, epoch, or global-step state."
+        ),
+    )
     parser.add_argument("--encoder_ckpt", default="")
     parser.add_argument("--fast", action="store_true")
     parser.add_argument("--deepspeed", action="store_true")
@@ -145,8 +152,8 @@ def load_config(args, mode):
         "base_lr", "use_amp", "amp_type", "gradient_clip_val",
         "gradient_clip_algorithm", "every_n_train_epochs",
         "log_every_n_steps", "val_every_n_epoch", "limit_val_batches",
-        "monitor", "output_dir", "ckpt_path", "encoder_ckpt", "fast",
-        "deepspeed",
+        "monitor", "output_dir", "ckpt_path", "init_ckpt",
+        "encoder_ckpt", "fast", "deepspeed",
     )
     runtime = {key: getattr(args, key) for key in keys}
     config.training = OmegaConf.merge(
@@ -267,6 +274,18 @@ def main():
     model = instantiate_from_config(config.model)
     model.learning_rate = config.training.base_lr
     model.max_epochs = config.training.epochs
+    if config.training.init_ckpt and config.training.ckpt_path:
+        raise ValueError(
+            "--init_ckpt and --ckpt_path are mutually exclusive: use "
+            "--init_ckpt for weights-only initialization or --ckpt_path "
+            "for full training-state resume."
+        )
+    init_checkpoint = resolve_checkpoint(config.training.init_ckpt)
+    if init_checkpoint is not None:
+        load_weights(model, init_checkpoint)
+        rank_zero_info(
+            f"Initialized model weights from checkpoint: {init_checkpoint}"
+        )
     if config.training.encoder_ckpt:
         model.load_encoder(config.training.encoder_ckpt)
 
