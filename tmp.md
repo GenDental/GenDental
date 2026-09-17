@@ -1,1 +1,0 @@
-test是ckpt-epoch=1-val_total_loss=0.540584.ckpt, test2是546.ckpt, test3是558， test4是ckpt-epoch=16-val_total_loss=0.557773.ckpt

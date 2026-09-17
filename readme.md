@@ -89,7 +89,7 @@ OUTPUT_DIR=/path/to/checkpoints bash scripts/train_stage_one.sh
 To get synthetic post-orthodontic data:
 
  ```shell
- bash scripts/test_stage_one.sh
+ bash scripts/sample_stage_one.sh
  ```
 
 Stage I generation does not load a dataset:
@@ -157,7 +157,7 @@ scripts use generate mode and do not construct a DataLoader.
 Stage I generates synthetic post-treatment tooth point clouds:
 
 ```shell
-bash scripts/test_stage_one.sh
+bash scripts/sample_stage_one.sh
 ```
 
 The commonly changed options can be provided as environment variables:

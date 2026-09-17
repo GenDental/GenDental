@@ -1,1 +1,0 @@
-from models.global_encoder.gpt import LatentGPT

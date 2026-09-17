@@ -1,8 +1,8 @@
 model:
-  module: models.global_encoder.gpt_old.oldGPT
+  module: models.global_encoder.gpt.GPT
   params:
     transformer_config:
-      module: models.global_encoder.gpt_blocks_old.old_transformer
+      module: models.global_encoder.gpt_blocks.transformer
       params:
         trans_dim: 768
         depth: 18
@@ -64,8 +64,8 @@ model:
 dataset:
   module: dataset.teeth_dataset.TeethDataManager
   params:
-    data_path: /data3/leics/dataset/teeth/sample512_merged
-    index_path: files/zj
+    data_path: /
+    index_path: /
     batch_size: 16
     with_normals: false
 
@@ -75,7 +75,7 @@ generation:
   batch_size: 16
   save_merged: true
   seed: 3407
-  reference_data_path: /data3/leics/dataset/teeth/sample512_merged
-  reference_index_path: files/zj
+  reference_data_path: /
+  reference_index_path: /
   center_noise_scale: 0.02
   center_mode: reference

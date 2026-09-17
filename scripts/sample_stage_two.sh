@@ -10,16 +10,16 @@ esac
 if [[ "$TASK_MODE" == "target" ]]; then
   DEFAULT_CKPT_PATH="/data3/leics/dataset/checkpoints/GenDental/stage_two_target/ckpt/last.ckpt"
 else
-  DEFAULT_CKPT_PATH="/data3/leics/dataset/checkpoints/ToothWise/motion_transfer3/ckpt/last.ckpt"
+  DEFAULT_CKPT_PATH="/data3/leics/dataset/checkpoints/GenDental/stage_two_motion/ckpt/last.ckpt"
 fi
 CKPT_PATH="${CKPT_PATH:-$DEFAULT_CKPT_PATH}"
 if [[ -z "$CKPT_PATH" ]]; then
   echo "CKPT_PATH is required when TASK_MODE=target" >&2
   exit 2
 fi
-STYLE_DIR="${STYLE_DIR:-/data3/leics/dataset/teeth/sample512_zj}"
-DATA_DIR="${DATA_DIR:-/data3/leics/dataset/GenDental/old_gpt_stochastic_samples}"
-OUTPUT_DIR="${OUTPUT_DIR:-/data3/leics/dataset/GenDental/stage_two_samples}"
+STYLE_DIR="${STYLE_DIR:-./reference_data}"
+DATA_DIR="${DATA_DIR:-./stage_one_samples}"
+OUTPUT_DIR="${OUTPUT_DIR:-./stage_two_samples}"
 BATCH_SIZE="${BATCH_SIZE:-64}"
 SEED="${SEED:-3407}"
 

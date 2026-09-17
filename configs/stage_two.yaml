@@ -30,8 +30,8 @@ model:
 dataset:
   module: dataset.style_transfer.StageTwoDataManager
   params:
-    data_path: /data3/leics/dataset/teeth/sample512_merged
-    index_path: "files/motion"
+    data_path: /
+    index_path: /
     batch_size: 8
     task_mode: ${model.params.task_mode}
 

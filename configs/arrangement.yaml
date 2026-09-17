@@ -28,8 +28,8 @@ dataset:
   module: dataset.teeth_dataset.TeethDataManager
   params:
     with_normals: False
-    data_path: /data3/leics/dataset/teeth/merged_alignment_5x
-    index_path: "files/alignment_zj"
+    data_path: /
+    index_path: /
     batch_size: 16
 
 

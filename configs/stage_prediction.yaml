@@ -26,8 +26,8 @@ model:
 dataset:
   module: dataset.style_transfer.MotionDataManager
   params:
-    data_path: /data3/leics/dataset/teeth/merged_process_nonsmoothed10x_newckpt
-    index_path: "files/ours_process"
+    data_path: /
+    index_path: /
     batch_size: 16
 
 
