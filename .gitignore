@@ -13,6 +13,3 @@ __pycache__/
 # IDE
 .vscode/
 .idea/
-
-# files
-.files/
