@@ -9,7 +9,7 @@ DATA_PATH="${DATA_PATH:-/data3/leics/dataset/teeth/sample512_merged}"
 INDEX_PATH="${INDEX_PATH:-files/zj}"
 EPOCHS="${EPOCHS:-1000}"
 BASE_LR="${BASE_LR:-1e-4}"
-BATCH_SIZE="${BATCH_SIZE:-16}"
+BATCH_SIZE="${BATCH_SIZE:-8}"
 
 run_gendental train configs/stage_one.yaml \
   --output_dir "$OUTPUT_DIR" --epochs "$EPOCHS" \

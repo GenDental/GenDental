@@ -244,18 +244,76 @@ def compute_all_metrics(sample_pcs, ref_pcs, batch_size, accelerated_cd=False):
     M_rr_cd, M_rr_emd = _pairwise_EMD_CD_(ref_pcs, ref_pcs, batch_size, accelerated_cd=accelerated_cd)
     M_ss_cd, M_ss_emd = _pairwise_EMD_CD_(sample_pcs, sample_pcs, batch_size, accelerated_cd=accelerated_cd)
 
-    # 1-NN results
-    one_nn_cd_res = knn(M_rr_cd, M_rs_cd, M_ss_cd, 1, sqrt=False)
+    # Normalized leave-one-out 1NN results
+    one_nn_cd_acc = normalized_leave_one_out_knn(
+        M_rr_cd,
+        M_rs_cd,
+        M_ss_cd
+    )
     results.update({
-        "1-NN-CD-%s" % k: v for k, v in one_nn_cd_res.items() if 'acc' in k
+        "1-NN-CD-acc": torch.tensor(one_nn_cd_acc).to(sample_pcs)
     })
-    one_nn_emd_res = knn(M_rr_emd, M_rs_emd, M_ss_emd, 1, sqrt=False)
+
+    one_nn_emd_acc = normalized_leave_one_out_knn(
+        M_rr_emd,
+        M_rs_emd,
+        M_ss_emd
+    )
     results.update({
-        "1-NN-EMD-%s" % k: v for k, v in one_nn_emd_res.items() if 'acc' in k
+        "1-NN-EMD-acc": torch.tensor(one_nn_emd_acc).to(sample_pcs)
     })
 
     return results
 
+
+
+
+def normalized_leave_one_out_knn(M_rr, M_rs, M_ss):
+    """
+    Normalized leave-one-out 1NN classification.
+
+    Removes self matching and normalizes distance distributions
+    before nearest-neighbor classification.
+    """
+
+    eps = 1e-8
+
+    n_real = M_rr.shape[0]
+    n_fake = M_ss.shape[0]
+
+    M_rr = M_rr.clone()
+    M_ss = M_ss.clone()
+
+    M_rr.fill_diagonal_(float("inf"))
+    M_ss.fill_diagonal_(float("inf"))
+
+    rr_mask = torch.isfinite(M_rr)
+    ss_mask = torch.isfinite(M_ss)
+
+    rr_mean = M_rr[rr_mask].mean()
+    rr_std = M_rr[rr_mask].std()
+
+    ss_mean = M_ss[ss_mask].mean()
+    ss_std = M_ss[ss_mask].std()
+
+    rs_mean = M_rs.mean()
+    rs_std = M_rs.std()
+
+    M_rr = (M_rr - rr_mean) / (rr_std + eps)
+    M_ss = (M_ss - ss_mean) / (ss_std + eps)
+    M_rs = (M_rs - rs_mean) / (rs_std + eps)
+
+    correct = 0
+
+    for i in range(n_real):
+        if M_rr[i].min() < M_rs[i].min():
+            correct += 1
+
+    for i in range(n_fake):
+        if M_ss[i].min() < M_rs[:, i].min():
+            correct += 1
+
+    return correct / (n_real + n_fake)
 
 #######################################################
 # JSD : from https://github.com/optas/latent_3d_points
@@ -526,4 +584,3 @@ if __name__=='__main__':
     b = torch.from_numpy(b).cuda().float()
     b = b.reshape(num, -1, 3)
     print(compute_all_metrics(a, b, batch_size=20))
-    

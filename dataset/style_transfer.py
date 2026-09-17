@@ -103,14 +103,14 @@ class MotionDataManager(pl.LightningDataModule):
         self.batch_size = batch_size
 
     def train_dataloader(self):
-        file = os.path.join(self.index_path,'train.npy')
+        file = os.path.join(self.index_path,'train1.npy')
         train_dataset = MotionDataset(self.data_path,file)
-        return DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True, drop_last=True)
+        return DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True, drop_last=False)
 
     def val_dataloader(self):
         file = os.path.join(self.index_path,'val.npy')
         val_dataset = MotionDataset(self.data_path,file)
-        return DataLoader(val_dataset, batch_size=self.batch_size, drop_last=True)
+        return DataLoader(val_dataset, batch_size=self.batch_size, drop_last=False)
     
     def test_dataloader(self):
         file = os.path.join(self.index_path,'test.npy')

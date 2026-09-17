@@ -89,7 +89,7 @@ class TeethDataManager(pl.LightningDataModule):
         self.with_normals = with_normals
 
     def train_dataloader(self):
-        file = os.path.join(self.index_path,'train5.npy')
+        file = os.path.join(self.index_path,'train0.npy')
         train_dataset = TeethDataset(self.data_path,file,self.with_normals)
         return DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True, drop_last=True)
 

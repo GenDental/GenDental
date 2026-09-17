@@ -9,11 +9,16 @@ from torch.nn.utils.rnn import pad_packed_sequence, pack_padded_sequence
 from typing import List, Tuple, Dict, Sequence, Any
 
 
-class AdjacencyList:
+class AdjacencyList(nn.Module):
     """represent the topology of a graph"""
     def __init__(self, node_num: int, adj_list: List, device: torch.device):
+        super().__init__()
         self.node_num = node_num
-        self.data = torch.tensor(adj_list, dtype=torch.long, device=device)
+        self.register_buffer(
+            'data',
+            torch.tensor(adj_list, dtype=torch.long, device=device),
+            persistent=False,
+        )
         self.edge_num = len(adj_list)
 
     @property

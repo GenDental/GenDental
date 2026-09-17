@@ -2,8 +2,8 @@
 set -euo pipefail
 source "$(dirname -- "${BASH_SOURCE[0]}")/_common.sh"
 
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-2,3}"
-OUTPUT_DIR="${OUTPUT_DIR:-/data3/leics/dataset/checkpoints/Gendental/TAlig4x}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-5}"
+OUTPUT_DIR="${OUTPUT_DIR:-/data3/leics/dataset/checkpoints/Gendental/TAlig0x}"
 CKPT_PATH="${CKPT_PATH:-}"
 INIT_CKPT="${INIT_CKPT:-}"
 DATA_PATH="${DATA_PATH:-/data3/leics/dataset/teeth/merged_alignment_5x}"

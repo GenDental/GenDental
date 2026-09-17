@@ -86,7 +86,7 @@ def training_resources(config):
         mode="min",
         save_top_k=3,
         save_last=True,
-        every_n_epochs=config.training.every_n_train_epochs,
+        # every_n_epochs=10,
     )
     logger = TensorBoardLogger(str(setup.logdir), name="tensorboard")
     lr_monitor = LearningRateMonitor(logging_interval="epoch")

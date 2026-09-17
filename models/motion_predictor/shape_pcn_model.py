@@ -71,7 +71,11 @@ class PCN(nn.Module):
         a = torch.linspace(-0.05, 0.05, steps=self.grid_size, dtype=torch.float).view(1, self.grid_size).expand(self.grid_size, self.grid_size).reshape(1, -1)
         b = torch.linspace(-0.05, 0.05, steps=self.grid_size, dtype=torch.float).view(self.grid_size, 1).expand(self.grid_size, self.grid_size).reshape(1, -1)
         
-        self.folding_seed = torch.cat([a, b], dim=0).view(1, 2, self.grid_size ** 2).cuda()  # (1, 2, S)
+        self.register_buffer(
+            'folding_seed',
+            torch.cat([a, b], dim=0).view(1, 2, self.grid_size ** 2),
+            persistent=False,
+        )  # (1, 2, S)
 
     def forward(self, xyz):
         B, N, _ = xyz.shape
@@ -128,7 +132,9 @@ class get_model(nn.Module):
         # teeth_pc 28*(B*6*400)
         teeth_pc = torch.chunk(point_clouds, self.num_teeth, dim=1)
 
-        code_list = torch.zeros([self.num_teeth, B, self.latent_dim])
+        code_list = point_clouds.new_zeros(
+            [self.num_teeth, B, self.latent_dim]
+        )
         re_pc_teeth_coarse = []
         re_pc_teeth_dense = []
         for i in range(self.num_teeth):
